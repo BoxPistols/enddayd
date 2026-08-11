@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck -s bash enddayd.sh
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install bats
+        run: npm install -g bats
+      - name: run tests
+        run: bats tests/
+
+  # macOS の bash は 3.2 なので、そこでも構文が通ることを確認する
+  bash32:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: syntax check with system bash
+        run: /bin/bash -n enddayd.sh
+      - name: plist generation
+        run: |
+          /bin/bash enddayd.sh plist > /tmp/out.plist
+          plutil -lint /tmp/out.plist
