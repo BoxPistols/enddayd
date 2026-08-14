@@ -1,12 +1,35 @@
 # enddayd
 
-決まった時刻にMacを強制的に終了させる、1ファイルのシェルスクリプトです。
+決まった時刻にMacを強制的に終了させる、1ファイルのシェルスクリプトです。macOS 専用。
+
+## まずこれだけ
+
+```bash
+chmod +x enddayd.sh
+sudo ./enddayd.sh setup       # 対話で時刻・曜日・強制レベルを設定
+sudo ./enddayd.sh rehearsal 5 # 全段階を5秒間隔で確認（終了はしません）
+```
+
+導入直後はドライランなので、この時点では電源は落ちません。数日そのまま様子を見て、問題なければ本番に切り替えます。
+
+```bash
+sudo ./enddayd.sh dryrun off
+```
+
+やめるときは `sudo ./enddayd.sh uninstall`。
+
+## 導入後の流れ
+
+1. **初日** — `setup` で導入し、`rehearsal` でアラートの見え方を確認する
+2. **数日間** — ドライランのまま放置。実際の時刻に通知だけが出る。`sudo ./enddayd.sh status` でログを見る
+3. **納得したら** — `dryrun off` で本番へ。以降は設定した時刻に本当に終了する
+4. **調整したくなったら** — `setup` を再実行（現在値が初期値として出ます）
+
+## なぜ作るのか
 
 AI駆動開発では、疲労が終業のブレーキとして機能しなくなります。エージェントのターンで区切りが決まり、1回の試行コストが下がり、結果が確率的なので、自分で切り上げる判断そのものが発生しにくくなります。判断材料がないところに意志を求めても仕方がないので、判断を外部化するのが目的です。
 
-macOS 専用です。
-
-## できること
+## 動作
 
 | 段階 | 既定時刻 | 動作 |
 | --- | --- | --- |
@@ -29,13 +52,19 @@ chmod +x enddayd.sh
 sudo ./enddayd.sh setup
 ```
 
-`setup` は対話で設定を尋ね、`/etc/enddayd.conf` に保存し、LaunchDaemon の plist を生成して登録します。既定値のまま入れる場合は `sudo ./enddayd.sh install`。
+`setup` は対話で設定を尋ね、`/etc/enddayd.conf` に保存し、LaunchDaemon の plist を生成して登録します。既定値のまま入れる場合は `sudo ./enddayd.sh install`。設定ファイルを手で編集した場合は `sudo ./enddayd.sh reload` で反映します。
 
-導入直後はドライランです。数日そのまま運用して、通知の時刻と文言が自分に合っているか確かめてください。
+インストールされるもの:
 
-```bash
-sudo ./enddayd.sh dryrun off    # 本番に切り替える
-```
+| パス | 内容 |
+| --- | --- |
+| `/usr/local/bin/enddayd.sh` | スクリプト本体 |
+| `/Library/LaunchDaemons/local.enddayd.plist` | 起動スケジュール |
+| `/etc/enddayd.conf` | 設定 |
+| `/etc/enddayd.dryrun` | あるあいだはドライラン |
+| `/var/log/enddayd.log` | 実行ログ |
+
+`uninstall` は設定ファイル（`/etc/enddayd.conf`）を残します。完全に消すなら手動で削除してください。
 
 ## コマンド
 
@@ -93,7 +122,7 @@ bats tests/
 
 ## 他OSでやる場合
 
-[docs/windows.md](docs/windows.md) に Windows での対応表を置いています。WSL2 は避けたほうがいいです（理由も同ファイル）。
+このリポジトリは macOS 専用です。[docs/windows.md](docs/windows.md) に Windows での対応表を置いていますが、実装は含みません（手順書ではなく、移植する人向けのメモです）。WSL2 は避けたほうがいいです。理由も同ファイルに書いています。
 
 ## ライセンス
 
