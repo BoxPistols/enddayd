@@ -1,3 +1,5 @@
 .DS_Store
 *.log
 *.plist.bak
+menubar/build/
+menubar/dist/

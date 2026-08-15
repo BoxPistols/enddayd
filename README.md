@@ -49,11 +49,20 @@ AI駆動開発では、疲労が終業のブレーキとして機能しなくな
 ## インストール
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/BoxPistols/enddayd/main/enddayd.sh -o enddayd.sh
+sudo bash enddayd.sh setup
+```
+
+リポジトリごと持ってくる場合はこちら。
+
+```bash
 git clone https://github.com/BoxPistols/enddayd.git
 cd enddayd
 chmod +x enddayd.sh
 sudo ./enddayd.sh setup
 ```
+
+`curl … | sudo bash` のようにパイプで渡す形は使えません。本体の場所が分からず、配置するファイルを特定できないためです。その場合はその旨を表示して停止します。
 
 `setup` は対話で設定を尋ね、`/etc/enddayd.conf` に保存し、LaunchDaemon の plist を生成して登録します。設定ファイルが無ければ既定値で入れる場合は `sudo ./enddayd.sh install`（既にある設定は上書きしません）。設定ファイルを手で編集した場合は `sudo ./enddayd.sh reload` で反映します。
 
@@ -182,3 +191,22 @@ shellcheck -s bash enddayd.sh
 ## ライセンス
 
 MIT
+
+## メニューバーアプリ（自分用）
+
+ターミナルを開かずに操作したい場合は、同梱のメニューバーアプリを使えます。配布はしていないので、自分でビルドします。
+
+```bash
+cd menubar
+./build.sh
+cp -R dist/Enddayd.app /Applications/
+open /Applications/Enddayd.app
+```
+
+Xcode は不要で、Command Line Tools だけで通ります（Swift 6 / SwiftUI、arm64 と x86_64 のユニバーサル）。
+
+アプリは root を持ちません。状態の読み取りは権限なしで行い、変更が要る操作だけ macOS 標準のパスワードダイアログを出します。デーモン本体は同梱した `enddayd.sh` そのもので、未導入の Mac ならアプリの「導入する」から入れられます。
+
+できること: 状態表示（次の強制終了までの残り時間）、今日はスキップ、停止と再開、時刻・曜日・レベルの変更、リハーサル、アンインストール、ログイン時に起動。
+
+ad-hoc 署名なので、他人の Mac に配ると初回に Gatekeeper の確認が出ます。配布を前提にするなら Apple Developer の署名と公証が要ります。

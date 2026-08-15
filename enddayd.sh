@@ -462,6 +462,19 @@ load_daemon() {
 install_self() {
   local self dir
   self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+
+  # curl … | sudo bash では $0 が "bash" になり、本体の場所が分からない。
+  # そのまま進むと cwd の別ファイルを配置しかねないので、ここで止める。
+  if [ ! -f "$self" ]; then
+    {
+      echo "本体の場所を特定できません（パイプ経由で実行していませんか）"
+      echo "  いったんファイルに保存してから実行してください:"
+      echo "  curl -fsSL https://raw.githubusercontent.com/BoxPistols/enddayd/main/enddayd.sh -o enddayd.sh"
+      echo "  sudo bash enddayd.sh setup"
+    } >&2
+    return 1
+  fi
+
   dir=$(dirname "$BIN")
   if [ ! -d "$dir" ]; then
     if ! install -d -m 755 -o root -g wheel "$dir"; then
