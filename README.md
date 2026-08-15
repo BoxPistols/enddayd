@@ -23,7 +23,7 @@ sudo ./enddayd.sh dryrun off
 1. **初日** — `setup` で導入し、`rehearsal` でアラートの見え方を確認する
 2. **数日間** — ドライランのまま放置。実際の時刻に通知だけが出る。`sudo ./enddayd.sh status` でログを見る
 3. **納得したら** — `dryrun off` で本番へ。以降は設定した時刻に本当に終了する
-4. **調整したくなったら** — `setup` を再実行（現在値が初期値として出ます）
+4. **調整したくなったら** — `setup` を再実行（現在値が初期値として出ます）。本番で動いているあいだは「このまま本番を続けるか」を尋ねます。設定を変えただけで黙ってドライランに戻ることはありません
 
 ## なぜ作るのか
 
@@ -38,9 +38,12 @@ AI駆動開発では、疲労が終業のブレーキとして機能しなくな
 | 最終通告 | 18:45 | まもなく終了すると予告 |
 | 強制終了 | 18:50 | 設定レベルに応じて終了 |
 
+`normal` と `hard` は落とす直前に理由を画面に出します（10秒で自動的に閉じ、閉じても中断はできません）。スリープ復帰が猶予内に入ると予告も警告も見ないまま電源が落ちるので、無言だとクラッシュと区別が付かないためです。
+
 - 時刻・曜日・強制レベルを対話的に設定
 - 導入直後は必ずドライラン。明示的に切り替えるまで終了しない
 - スリープ復帰時の遅延実行で誤爆しない
+- 設定は読むたびに検証する。壊れていれば走らず、理由をログと画面に出す
 - 当日限りの回避手段あり（ただし摩擦つき）
 
 ## インストール
@@ -52,7 +55,7 @@ chmod +x enddayd.sh
 sudo ./enddayd.sh setup
 ```
 
-`setup` は対話で設定を尋ね、`/etc/enddayd.conf` に保存し、LaunchDaemon の plist を生成して登録します。既定値のまま入れる場合は `sudo ./enddayd.sh install`。設定ファイルを手で編集した場合は `sudo ./enddayd.sh reload` で反映します。
+`setup` は対話で設定を尋ね、`/etc/enddayd.conf` に保存し、LaunchDaemon の plist を生成して登録します。設定ファイルが無ければ既定値で入れる場合は `sudo ./enddayd.sh install`（既にある設定は上書きしません）。設定ファイルを手で編集した場合は `sudo ./enddayd.sh reload` で反映します。
 
 インストールされるもの:
 
@@ -62,9 +65,20 @@ sudo ./enddayd.sh setup
 | `/Library/LaunchDaemons/local.enddayd.plist` | 起動スケジュール |
 | `/etc/enddayd.conf` | 設定 |
 | `/etc/enddayd.dryrun` | あるあいだはドライラン |
-| `/var/log/enddayd.log` | 実行ログ |
+| `/var/log/enddayd.log` | 実行ログ（`status` が見せるのはこちら） |
+| `/var/log/enddayd.err.log` | エラー出力（`status` が末尾を出します） |
 
-`uninstall` は設定ファイル（`/etc/enddayd.conf`）を残します。完全に消すなら手動で削除してください。
+`uninstall` は設定（`/etc/enddayd.conf`）とログを残します。完全に消すなら手動で削除してください。
+
+### 設定ファイルを手で編集した場合
+
+`/etc/enddayd.conf` は読み込むたびに検証されます。段階が4つ揃っているか、時刻が HH:MM で早い順に並んでいるか、曜日・レベル・猶予が妥当かを見て、通らなければ次のように扱います。
+
+- `run`（デーモンからの呼び出し）は何もせず、理由をログに書いて画面にアラートを出す
+- `reload` / `install` / `setup` は plist を差し替えない（動いているデーモンを壊さない）
+- `status` / `config` は理由と生の値を表示する
+
+黙って既定値に戻ったり、黙って何もしなくなったりはしません。このツールで一番まずい壊れ方は「効いていないことに気づかない」ことなので、壊れているときは動かないほうを選びます。
 
 ## コマンド
 
@@ -93,13 +107,46 @@ sudo ./enddayd.sh setup
 
 `normal` 以上は、アプリの「終了してよいですか」を経由しません。ターミナルでプロセスを走らせたままでも落ちます。
 
-## 当日だけ止める
+## 止める・やめる
+
+強い順に3つあります。どれも1コマンドで、**いちばん強いものはこのスクリプトが無くても効きます**。
+
+### 1. 今日だけ見送る
 
 ```bash
 sudo sh -c 'date +%F > /etc/enddayd.skip'
 ```
 
 中身の日付が当日と一致する場合のみスキップします。翌日は自動的に復活します。`setup` でこの機能自体を無効にもできます。
+
+### 2. 当面止める（非常停止）
+
+```bash
+sudo touch /etc/enddayd.dryrun
+```
+
+このファイルがあるあいだは通知だけが出て、電源は落ちません。**スクリプトがどこにあるか分からなくても、このコマンドだけで止まります。** 戻すのは `sudo rm /etc/enddayd.dryrun`。`dryrun on` / `off` がやっているのはこれと同じことです。
+
+### 3. 完全に消す
+
+```bash
+sudo enddayd.sh uninstall
+```
+
+LaunchDaemon を外し、本体・plist・ドライラン旗・当日スキップを削除します。外れたことを確認してから完了と表示します。設定とログは残るので、それも消すなら:
+
+```bash
+sudo rm -f /etc/enddayd.conf /var/log/enddayd.log /var/log/enddayd.err.log
+```
+
+スクリプトごと消してしまった場合でも、launchd から直接外せます。
+
+```bash
+sudo launchctl bootout system/local.enddayd
+sudo rm -f /Library/LaunchDaemons/local.enddayd.plist
+```
+
+この3つが効くことはテストで見ています（非常停止が単独で効くこと、`uninstall` が何を消して何を残すか）。
 
 ## 設計メモ
 
@@ -111,14 +158,22 @@ sudo sh -c 'date +%F > /etc/enddayd.skip'
 
 **通知は `display alert` を使う。** `display notification` は通知許可の状態次第で無音のまま消えます。無視できる通知には意味がありません。
 
+**壊れた設定では動かさない。** 設定を読むたびに検証し、通らなければ実行しません。判定に使う値が欠けたまま進むと、時間帯の判定が総崩れになって「何もしない」で終わり、しかもそれが `skip: out of window` という正常時と同じログに見えます。気づけない停止のほうが、止まって文句を言われるより悪いです。
+
+**plist は一時ファイルに書いて検査してから差し替える。** 生成先に直接リダイレクトすると、途中で失敗したときに 0 バイトの plist が残ります。その時点で古いジョブは `bootout` 済みなので、デーモンが黙って消えます。
+
 ## 開発
 
 ```bash
 shellcheck -s bash enddayd.sh
-bats tests/
+./tests/run.sh
 ```
 
-テストは macOS 固有のコマンドをスタブに差し替えたコピーに対して実行するので、Linux でも通ります。CI では加えて macOS ランナーで bash 3.2 の構文チェックと `plutil -lint` を通しています。
+テストは macOS 固有のコマンドをスタブに差し替えたコピーに対して実行するので、Linux でも通ります。CI では ubuntu と macOS の両方でこれを回し、macOS 側では加えて bash 3.2 の構文チェックと `plutil -lint` を通しています。
+
+`tests/run.sh` は `bats` を実行したあと、宣言した件数だけ実際に実行されたかを突き合わせます。**bats 1.11 以降はテスト名に非 ASCII が含まれるとそのテストを読み飛ばす**ためです（1.10 以前は実行できます）。テスト名は ASCII で書き、説明は日本語コメントに置いてください。
+
+未対応の課題は [docs/known-issues.md](docs/known-issues.md) にまとめています。
 
 ## 他OSでやる場合
 

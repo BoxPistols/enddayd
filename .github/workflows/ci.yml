@@ -21,12 +21,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install bats
-        run: npm install -g bats
+        # グローバル導入は runner によって /usr/local の権限が違い、ubuntu では
+        # man ページの配置で EACCES になる。ホーム配下の prefix なら両方で通る。
+        run: |
+          npm install -g --prefix "$HOME/.local" bats@1.13.0
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: run tests
-        run: bats tests/
+        run: ./tests/run.sh
 
-  # macOS の bash は 3.2 なので、そこでも構文が通ることを確認する
-  bash32:
+  # macOS の bash は 3.2 なので、そこでも構文と挙動が通ることを確認する
+  macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,3 +40,11 @@ jobs:
         run: |
           /bin/bash enddayd.sh plist > /tmp/out.plist
           plutil -lint /tmp/out.plist
+      - name: install bats
+        # グローバル導入は runner によって /usr/local の権限が違い、ubuntu では
+        # man ページの配置で EACCES になる。ホーム配下の prefix なら両方で通る。
+        run: |
+          npm install -g --prefix "$HOME/.local" bats@1.13.0
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: run tests
+        run: ./tests/run.sh
