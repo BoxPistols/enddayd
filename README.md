@@ -157,6 +157,25 @@ sudo rm -f /Library/LaunchDaemons/local.enddayd.plist
 
 この3つが効くことはテストで見ています（非常停止が単独で効くこと、`uninstall` が何を消して何を残すか）。
 
+## メニューバーアプリ（自分用）
+
+ターミナルを開かずに操作したい場合は、同梱のメニューバーアプリを使えます。配布はしていないので、自分でビルドします。
+
+```bash
+cd menubar
+./build.sh
+cp -R dist/Enddayd.app /Applications/
+open /Applications/Enddayd.app
+```
+
+Xcode は不要で、Command Line Tools だけで通ります（Swift 6 / SwiftUI、arm64 と x86_64 のユニバーサル）。
+
+アプリは root を持ちません。状態の読み取りは権限なしで行い、変更が要る操作だけ macOS 標準のパスワードダイアログを出します。デーモン本体は同梱した `enddayd.sh` そのもので、未導入の Mac ならアプリの「導入する」から入れられます。
+
+できること: 状態表示（次の強制終了までの残り時間）、今日はスキップ、停止と再開、時刻・曜日・レベルの変更、リハーサル、アンインストール、ログイン時に起動。
+
+ad-hoc 署名なので、他人の Mac に配ると初回に Gatekeeper の確認が出ます。配布を前提にするなら Apple Developer の署名と公証が要ります。
+
 ## 設計メモ
 
 **root の LaunchDaemon から直接落とす。** アプリの拒否権を通らない経路が必要です。ユーザー権限の LaunchAgent や AppleScript 経由では、未保存の書類やターミナルのプロセスで止まります。逆に、警告段階のログアウトはあえて止まる経路にしてあり、拒否されればそれが保存の機会になります。
@@ -191,22 +210,3 @@ shellcheck -s bash enddayd.sh
 ## ライセンス
 
 MIT
-
-## メニューバーアプリ（自分用）
-
-ターミナルを開かずに操作したい場合は、同梱のメニューバーアプリを使えます。配布はしていないので、自分でビルドします。
-
-```bash
-cd menubar
-./build.sh
-cp -R dist/Enddayd.app /Applications/
-open /Applications/Enddayd.app
-```
-
-Xcode は不要で、Command Line Tools だけで通ります（Swift 6 / SwiftUI、arm64 と x86_64 のユニバーサル）。
-
-アプリは root を持ちません。状態の読み取りは権限なしで行い、変更が要る操作だけ macOS 標準のパスワードダイアログを出します。デーモン本体は同梱した `enddayd.sh` そのもので、未導入の Mac ならアプリの「導入する」から入れられます。
-
-できること: 状態表示（次の強制終了までの残り時間）、今日はスキップ、停止と再開、時刻・曜日・レベルの変更、リハーサル、アンインストール、ログイン時に起動。
-
-ad-hoc 署名なので、他人の Mac に配ると初回に Gatekeeper の確認が出ます。配布を前提にするなら Apple Developer の署名と公証が要ります。
