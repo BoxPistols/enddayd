@@ -21,7 +21,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install bats
-        run: npm install -g bats@1.13.0
+        # グローバル導入は runner によって /usr/local の権限が違い、ubuntu では
+        # man ページの配置で EACCES になる。ホーム配下の prefix なら両方で通る。
+        run: |
+          npm install -g --prefix "$HOME/.local" bats@1.13.0
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: run tests
         run: ./tests/run.sh
 
@@ -37,6 +41,10 @@ jobs:
           /bin/bash enddayd.sh plist > /tmp/out.plist
           plutil -lint /tmp/out.plist
       - name: install bats
-        run: npm install -g bats@1.13.0
+        # グローバル導入は runner によって /usr/local の権限が違い、ubuntu では
+        # man ページの配置で EACCES になる。ホーム配下の prefix なら両方で通る。
+        run: |
+          npm install -g --prefix "$HOME/.local" bats@1.13.0
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: run tests
         run: ./tests/run.sh
