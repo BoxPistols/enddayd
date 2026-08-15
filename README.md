@@ -49,7 +49,7 @@ AI駆動開発では、疲労が終業のブレーキとして機能しなくな
 ## インストール
 
 ```bash
-git clone https://github.com/<user>/enddayd.git
+git clone https://github.com/BoxPistols/enddayd.git
 cd enddayd
 chmod +x enddayd.sh
 sudo ./enddayd.sh setup
