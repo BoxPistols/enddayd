@@ -33,6 +33,7 @@ LOG=/var/log/enddayd.log
 ERRLOG=/var/log/enddayd.err.log
 BYPASS=/etc/enddayd.skip
 DRYFLAG=/etc/enddayd.dryrun
+NEWSYSLOG=/etc/newsyslog.d/enddayd.conf
 
 GRACE_SOUND=/System/Library/Sounds/Sosumi.aiff
 FINAL_SOUND=/System/Library/Sounds/Basso.aiff
@@ -132,9 +133,15 @@ alert() {
     >/dev/null 2>&1
 }
 
-# GUI ユーザーがいなければ黙って諦める best-effort 版。
+# GUI ユーザーがいなければ諦める best-effort 版。
+# 諦めたことはログに残す。残さないと、ログに「設定が読めません」とあるのに
+# 画面には何も出ていない状況で、アラートを出したつもりなのか出せなかったのかが
+# 区別できない。
 console_alert() {
-  resolve_console || return 0
+  if ! resolve_console; then
+    log "alert skipped (no gui user): $1"
+    return 0
+  fi
   alert "$1" "$2" "${3:-30}"
   return 0
 }
@@ -156,14 +163,25 @@ automation_probe() {
 
 CONF_ERRORS=""
 
+# 走ることは走るが、書いたとおりには効かないもの。拒否すると
+# その日から強制終了ごと止まってしまうので、伝えるだけにする。
+CONF_WARNINGS=""
+
 conf_err() {
   [ -n "$CONF_ERRORS" ] && CONF_ERRORS="${CONF_ERRORS}"$'\n'
   CONF_ERRORS="${CONF_ERRORS}  - $1"
   return 0
 }
 
+conf_warn() {
+  [ -n "$CONF_WARNINGS" ] && CONF_WARNINGS="${CONF_WARNINGS}"$'\n'
+  CONF_WARNINGS="${CONF_WARNINGS}  - $1"
+  return 0
+}
+
 validate_conf() {
   CONF_ERRORS=""
+  CONF_WARNINGS=""
 
   if [ "$CONF_SYNTAX_ERROR" = "1" ]; then
     conf_err "$CONF に構文エラーがあります（bash -n \"$CONF\" で確認してください）"
@@ -221,6 +239,17 @@ validate_conf() {
     0|1) ;;
     *) conf_err "ALLOW_BYPASS は 0 か 1 です: ALLOW_BYPASS=\"$ALLOW_BYPASS\"" ;;
   esac
+
+  # 妥当な設定に対してだけ注意書きを作る。壊れているなら直すべきは
+  # そちらで、警告を重ねても読み手を迷わせるだけ。
+  if [ -z "$CONF_ERRORS" ]; then
+    local last end_of_day
+    last=$(to_min "${ta[3]}")
+    end_of_day=$((24 * 60 - 1))
+    if [ $((last + KILL_GRACE)) -gt "$end_of_day" ]; then
+      conf_warn "猶予が日をまたぎます。${ta[3]} から ${KILL_GRACE}分 は 23:59 で切れるので、実際に受け付けるのは $((end_of_day - last))分 です"
+    fi
+  fi
 
   [ -z "$CONF_ERRORS" ]
 }
@@ -305,6 +334,13 @@ cmd_run() {
   else log "skip: out of window (min=$MIN)"; exit 0; fi
 
   log "stage=$STAGE level=$LEVEL user=$CONSOLE_USER"
+
+  # 有効だが書いたとおりに効かない設定は、走るたびにログへ残す。
+  # status は $LOG しか見せないので、ここに出しておかないと
+  # 「なぜ猶予が短いのか」を追う手がかりがどこにも無くなる。
+  if [ -n "$CONF_WARNINGS" ]; then
+    log "config warning: $(echo "$CONF_WARNINGS" | tr '\n' ' ')"
+  fi
 
   case "$STAGE" in
 
@@ -487,6 +523,35 @@ load_daemon() {
   return 0
 }
 
+# ログのローテーション設定を置く。
+#
+# ログは追記のみで、放っておくと伸び続ける。1日4行程度なので実害が出るのは
+# 何年も先だが、rehearsal を繰り返すと増える。newsyslog は macOS 標準なので
+# 追加のデーモンは要らない。
+#
+# 失敗しても導入は止めない。ローテーションが無くても終業の機能は動くので、
+# ここで止めるほうが害が大きい。
+write_newsyslog() {
+  local dir tmp
+  dir=$(dirname "$NEWSYSLOG")
+  [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || { echo "$dir を作成できませんでした（ログは伸び続けます）" >&2; return 1; }
+
+  tmp="${NEWSYSLOG}.new.$$"
+  # logfilename [owner:group] mode count size when flags
+  #   size は KB。100KB を超えたら回し、5世代を bzip2 で残す
+  {
+    echo "# enddayd が置いたもの。uninstall で消える。"
+    printf '%-28s %-12s %s\n' "$LOG"    "root:wheel" "644  5     100  *     J"
+    printf '%-28s %-12s %s\n' "$ERRLOG" "root:wheel" "644  5     100  *     J"
+  } >"$tmp" 2>/dev/null || { rm -f "$tmp"; echo "$NEWSYSLOG を書けませんでした（ログは伸び続けます）" >&2; return 1; }
+
+  if ! mv "$tmp" "$NEWSYSLOG"; then
+    rm -f "$tmp"; echo "$NEWSYSLOG を更新できませんでした（ログは伸び続けます）" >&2; return 1
+  fi
+  chmod 644 "$NEWSYSLOG" 2>/dev/null || true
+  return 0
+}
+
 # 本体を $BIN へ置く。親ディレクトリは install が作らないので先に作る。
 install_self() {
   local self dir
@@ -646,6 +711,7 @@ cmd_setup() {
 
   install_self || exit 1
   write_conf
+  write_newsyslog || true
   if [ "$target_dry" = "1" ]; then touch "$DRYFLAG"; else rm -f "$DRYFLAG"; fi
   load_daemon || exit 1
   if ! daemon_loaded; then
@@ -681,6 +747,7 @@ cmd_install() {
   [ -f "$BIN" ] || fresh=1
   install_self || exit 1
   [ -f "$CONF" ] || write_conf
+  write_newsyslog || true
   [ "$fresh" = "1" ] && touch "$DRYFLAG"
   load_daemon || exit 1
   if ! daemon_loaded; then
@@ -713,7 +780,7 @@ cmd_uninstall() {
   /bin/launchctl bootout system "$PLIST" 2>/dev/null \
     || /bin/launchctl bootout "system/${LABEL}" 2>/dev/null \
     || true
-  rm -f "$PLIST" "$BIN" "$DRYFLAG" "$BYPASS"
+  rm -f "$PLIST" "$BIN" "$DRYFLAG" "$BYPASS" "$NEWSYSLOG"
 
   if daemon_loaded; then
     echo "デーモンをまだ外せていません。次を実行してください:" >&2
@@ -756,6 +823,10 @@ cmd_config_body() {
     echo "モード      : $MODE_OVERRIDE"
   else
     echo "モード      : $([ -f "$DRYFLAG" ] && echo ドライラン || echo 本番)"
+  fi
+  if [ -n "$CONF_WARNINGS" ]; then
+    echo "注意        : 設定は有効ですが、書いたとおりには効きません"
+    echo "$CONF_WARNINGS"
   fi
   return 0
 }

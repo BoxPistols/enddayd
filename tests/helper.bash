@@ -75,6 +75,7 @@ EOF
     -e "s#^BYPASS=.*#BYPASS=$SANDBOX/etc/skip#" \
     -e "s#^DRYFLAG=.*#DRYFLAG=$SANDBOX/etc/dryrun#" \
     -e "s#^CONF=.*#CONF=$SANDBOX/etc/conf#" \
+    -e "s#^NEWSYSLOG=.*#NEWSYSLOG=$SANDBOX/etc/newsyslog.d/enddayd.conf#" \
     -e "s#^GRACE_SOUND=.*#GRACE_SOUND=$SANDBOX/sound#" \
     -e "s#^FINAL_SOUND=.*#FINAL_SOUND=$SANDBOX/sound#" \
     "$BATS_TEST_DIRNAME/../enddayd.sh" >"$SCRIPT"

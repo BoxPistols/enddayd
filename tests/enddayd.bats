@@ -496,6 +496,92 @@ EOF
   contains "$output" "ドライランのまま"
 }
 
+# --- 有効だが効き方が違う設定 -------------------------------------------
+#
+# 拒否はしない。拒否するとその日から強制終了ごと止まってしまい、
+# 実害のほうが大きい。走らせたうえで、書いたとおりには効かないと伝える。
+
+# 猶予が日をまたぐ設定は、走るが注意を出す
+@test "warning: a grace crossing midnight is reported but still runs" {
+  write_conf_file 'TIMES="23:00,23:30,23:45,23:55"' 'WEEKDAYS="1,2,3,4,5,6,7"' \
+                  'LEVEL="normal"' 'KILL_GRACE="10"'
+  run run_at 1435
+  [ "$status" -eq 0 ]
+  contains "$output" "stage=enforce"
+  contains "$output" "config warning"
+  contains "$output" "23:59"
+}
+
+# 注意は config の表示にも出る（ログを見なくても分かるように）
+@test "warning: config shows the grace that actually applies" {
+  write_conf_file 'TIMES="23:00,23:30,23:45,23:55"' 'WEEKDAYS="1,2,3,4,5,6,7"' \
+                  'LEVEL="normal"' 'KILL_GRACE="10"'
+  run bash "$SCRIPT" config
+  contains "$output" "注意"
+  contains "$output" "4分"
+}
+
+# ちょうど 23:59 に収まる設定には出さない
+@test "warning: a grace ending at 23:59 is not reported" {
+  write_conf_file 'TIMES="23:00,23:30,23:45,23:55"' 'WEEKDAYS="1,2,3,4,5,6,7"' \
+                  'LEVEL="normal"' 'KILL_GRACE="4"'
+  run bash "$SCRIPT" config
+  not_contains "$output" "注意"
+}
+
+# 通常の設定には出さない（毎回出ると読まれなくなる）
+@test "warning: an ordinary schedule is not reported" {
+  run run_at 1130
+  not_contains "$output" "config warning"
+}
+
+# --- ログのローテーション -----------------------------------------------
+
+# 導入時に newsyslog の設定を置く。ログは追記のみで放置すると伸び続ける
+@test "newsyslog: install places a rotation config" {
+  run as_root_installable bash "$SCRIPT" install
+  [ "$status" -eq 0 ]
+  [ -f "$SANDBOX/etc/newsyslog.d/enddayd.conf" ]
+  contains "$(cat "$SANDBOX/etc/newsyslog.d/enddayd.conf")" "enddayd.log"
+  contains "$(cat "$SANDBOX/etc/newsyslog.d/enddayd.conf")" "enddayd.err.log"
+}
+
+# 削除時に消す。残すと存在しないログを回そうとする設定が居座る
+@test "newsyslog: uninstall removes the rotation config" {
+  as_root_installable bash "$SCRIPT" install
+  run as_root bash "$SCRIPT" uninstall
+  [ "$status" -eq 0 ]
+  [ ! -f "$SANDBOX/etc/newsyslog.d/enddayd.conf" ]
+}
+
+# 置けなくても導入は止めない。ローテーションが無くても終業は動く
+@test "newsyslog: a failure to write it does not stop the install" {
+  : >"$SANDBOX/etc/newsyslog.d"        # ディレクトリの場所をファイルで塞ぐ
+  run as_root_installable bash "$SCRIPT" install
+  [ "$status" -eq 0 ]
+  contains "$output" "導入しました"
+  [ ! -f "$SANDBOX/etc/newsyslog.d/enddayd.conf" ]
+}
+
+# --- GUI が無いとき -----------------------------------------------------
+
+# アラートを出せなかったことをログに残す。
+# 残さないと「出したつもり」と「出せなかった」が区別できない。
+@test "alert: giving up without a gui user is recorded" {
+  cat >"$SANDBOX/bin/stat" <<'EOF'
+#!/bin/bash
+echo "root"
+EOF
+  chmod +x "$SANDBOX/bin/stat"
+  write_conf_raw <<'EOF'
+TIMES="18:00,18:30,18:45"
+WEEKDAYS="1,2,3,4,5,6,7"
+LEVEL="normal"
+EOF
+  run run_at 1130
+  contains "$output" "alert skipped (no gui user)"
+}
+
 # --- ソースの決まりごと -------------------------------------------------
 
 # macOS の bash 3.2 はバイト単位で変数名を読むため、"$BYPASS）" のように

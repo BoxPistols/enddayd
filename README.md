@@ -77,6 +77,7 @@ sudo ./enddayd.sh setup
 | `/etc/enddayd.dryrun` | あるあいだはドライラン |
 | `/var/log/enddayd.log` | 実行ログ（`status` が見せるのはこちら） |
 | `/var/log/enddayd.err.log` | エラー出力（`status` が末尾を出します） |
+| `/etc/newsyslog.d/enddayd.conf` | ログのローテーション設定（100KB で回して5世代） |
 
 `uninstall` は設定（`/etc/enddayd.conf`）とログを残します。完全に消すなら手動で削除してください。
 
@@ -257,7 +258,7 @@ shellcheck -s bash enddayd.sh
 
 `menubar/build.sh` は Swift 6 言語モードでの型検査も通します。並行性の指摘は現在の既定だと警告どまりでビルドが成功してしまうので、通るうちに落としています。
 
-未対応の課題は [docs/known-issues.md](docs/known-issues.md) にまとめています。
+未対応の課題は [docs/known-issues.md](docs/known-issues.md) にまとめています。残っているうち3件は実機で1回試すまで確認できないもので、その手順は [docs/verify-on-device.md](docs/verify-on-device.md) にあります（**途中で実際に電源が落ちます**）。
 
 ## 他OSでやる場合
 
