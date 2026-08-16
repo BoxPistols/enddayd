@@ -375,6 +375,21 @@ EOF
   [ -z "$output" ]
 }
 
+# root で走るので launchctl は必ず /bin/launchctl と絶対パスで呼ぶ。PATH 経由に
+# すると差し替えられる余地が残る。テストのサンドボックスも /bin/launchctl を
+# 目印にスタブへ置換しているので、素の launchctl は本物を叩いてしまう。
+# 呼び出しを列挙して確かめると足し忘れを見落とすため、全出現を走査して
+# 許可した形（/bin/launchctl と、利用者が打つ手順の sudo launchctl）を
+# 取り除いた残りが 0 であることを見る。
+@test "lint: launchctl is always invoked by absolute path" {
+  local hits
+  hits=$(env LC_ALL=C sed \
+      -e 's#/bin/launchctl##g' \
+      -e 's#sudo launchctl##g' \
+      "$BATS_TEST_DIRNAME/../enddayd.sh" | grep -n 'launchctl' || true)
+  [ -z "$hits" ] || { echo "$hits"; false; }
+}
+
 # --- stage / rehearsal の引数 -------------------------------------------
 
 # 知らないステージ名はそこで止まる。

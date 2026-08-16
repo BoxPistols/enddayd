@@ -450,16 +450,16 @@ load_daemon() {
     fi
   fi
 
-  launchctl bootout system "$PLIST" 2>/dev/null || true
+  /bin/launchctl bootout system "$PLIST" 2>/dev/null || true
   chown root:wheel "$tmp" 2>/dev/null || true
   chmod 644 "$tmp"
   if ! mv "$tmp" "$PLIST"; then
     rm -f "$tmp"; echo "$PLIST を更新できませんでした" >&2; return 1
   fi
-  if ! launchctl bootstrap system "$PLIST"; then
-    echo "launchctl bootstrap に失敗しました（${PLIST}）" >&2; return 1
+  if ! /bin/launchctl bootstrap system "$PLIST"; then
+    echo "/bin/launchctl bootstrap に失敗しました（${PLIST}）" >&2; return 1
   fi
-  launchctl enable "system/${LABEL}" || true
+  /bin/launchctl enable "system/${LABEL}" || true
   return 0
 }
 
