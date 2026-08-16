@@ -463,6 +463,39 @@ EOF
   [ -f "$SANDBOX/enddayd.log" ]     # ログも残る
 }
 
+# --- 導入 ---------------------------------------------------------------
+#
+# install(1) はサンドボックスではスタブなので、本物が通ることの担保には
+# ならない。ここで見るのは「導入済みかどうかでモードをどう扱うか」の分岐。
+
+# 新規導入は必ずドライランから始まる
+@test "install: a fresh install starts in dry run" {
+  run as_root_installable bash "$SCRIPT" install
+  [ "$status" -eq 0 ]
+  contains "$output" "導入しました"
+  [ -f "$SANDBOX/etc/dryrun" ]
+}
+
+# 入れ直しても本番のままにする。更新のたびに黙ってドライランへ戻ると、
+# 効かなくなったことに気づけない（このツールで一番まずい壊れ方）。
+@test "install: reinstalling keeps production mode" {
+  as_root_installable bash "$SCRIPT" install
+  rm -f "$SANDBOX/etc/dryrun"            # 本番へ切り替えた状態にする
+  run as_root_installable bash "$SCRIPT" install
+  [ "$status" -eq 0 ]
+  [ ! -f "$SANDBOX/etc/dryrun" ]
+  contains "$output" "本番のまま"
+}
+
+# ドライランで入れ直したらドライランのまま（表示も現状を言う）
+@test "install: reinstalling keeps dry run mode" {
+  as_root_installable bash "$SCRIPT" install
+  run as_root_installable bash "$SCRIPT" install
+  [ "$status" -eq 0 ]
+  [ -f "$SANDBOX/etc/dryrun" ]
+  contains "$output" "ドライランのまま"
+}
+
 # --- ソースの決まりごと -------------------------------------------------
 
 # macOS の bash 3.2 はバイト単位で変数名を読むため、"$BYPASS）" のように

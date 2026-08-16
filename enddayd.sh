@@ -674,15 +674,26 @@ cmd_setup() {
 cmd_install() {
   need_root
   require_valid_conf || exit 1
+  # 新規かどうかを配置の前に見る。本番で動いているものを入れ直しただけで
+  # 黙ってドライランへ戻すと、効かなくなったことに気づけない。setup は
+  # 対話で尋ねているが、install には尋ねる場が無いので現状を保つ。
+  local fresh=0
+  [ -f "$BIN" ] || fresh=1
   install_self || exit 1
   [ -f "$CONF" ] || write_conf
-  touch "$DRYFLAG"
+  [ "$fresh" = "1" ] && touch "$DRYFLAG"
   load_daemon || exit 1
   if ! daemon_loaded; then
     echo "デーモンの登録を確認できませんでした（sudo $BIN status で確認してください）" >&2
     exit 1
   fi
-  echo "導入しました（ドライラン中：まだ終了しません）"
+  if [ "$fresh" = "1" ]; then
+    echo "導入しました（ドライラン中：まだ終了しません）"
+  elif [ -f "$DRYFLAG" ]; then
+    echo "入れ直しました（ドライランのまま：まだ終了しません）"
+  else
+    echo "入れ直しました（本番のまま：設定した時刻に実際に終了します）"
+  fi
   echo "  設定を変える: sudo $BIN setup"
   echo "  通しで確認  : sudo $BIN rehearsal"
   echo "  本番に切替  : sudo $BIN dryrun off"

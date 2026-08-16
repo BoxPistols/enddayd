@@ -20,11 +20,17 @@ EOF
 #!/bin/bash
 if [ "${1:-}" = "-u" ]; then echo 501; else echo 0; fi
 EOF
-  cat >"$SANDBOX/bin/launchctl" <<'EOF'
+  # 登録状態を持つ。print が常に失敗する固定スタブだと、bootstrap まで
+  # 進んだかどうかを見分けられず「登録を確認できませんでした」で終わる。
+  cat >"$SANDBOX/bin/launchctl" <<EOF
 #!/bin/bash
 # asuser <uid> <cmd...> のみ通す
-if [ "${1:-}" = "asuser" ]; then shift 2; exec "$@"; fi
-if [ "${1:-}" = "print" ]; then exit 1; fi
+if [ "\${1:-}" = "asuser" ]; then shift 2; exec "\$@"; fi
+case "\${1:-}" in
+  bootstrap) : >"$SANDBOX/daemon.loaded" ;;
+  bootout)   rm -f "$SANDBOX/daemon.loaded" ;;
+  print)     [ -f "$SANDBOX/daemon.loaded" ] || exit 1 ;;
+esac
 exit 0
 EOF
   cat >"$SANDBOX/bin/sudo" <<'EOF'
@@ -162,6 +168,36 @@ not_contains() {
     *"$2"*) echo "あってはならない文字列があります: $2" >&2; return 1 ;;
     *) return 0 ;;
   esac
+}
+
+# as_root_installable <コマンド…> : need_root に加えて install(1) も通す。
+# 本物の install は root 所有での配置を要求するのでサンドボックスでは通らない。
+# ここで差し替えるのは「配置できた前提の分岐」（導入済みかどうかでモードを
+# どう扱うか）を見るためで、本物の install が通ることの担保にはならない
+# （docs/known-issues.md「導入経路にテストが無い」）。
+as_root_installable() {
+  mkdir -p "$SANDBOX/rootbin"
+  cat >"$SANDBOX/rootbin/id" <<'EOF'
+#!/bin/bash
+echo 0
+EOF
+  cat >"$SANDBOX/rootbin/install" <<'EOF'
+#!/bin/bash
+# 所有者・パーミッションの指定は捨て、配置だけを再現する
+mode=copy
+files=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d) mode=dir; shift ;;
+    -m|-o|-g) shift 2 ;;
+    -*) shift ;;
+    *) files+=("$1"); shift ;;
+  esac
+done
+if [ "$mode" = dir ]; then mkdir -p "${files[@]}"; else cp "${files[0]}" "${files[1]}"; fi
+EOF
+  chmod +x "$SANDBOX/rootbin/id" "$SANDBOX/rootbin/install"
+  PATH="$SANDBOX/rootbin:$PATH" "$@"
 }
 
 # 直前の実行が stderr に出したもの
