@@ -12,9 +12,15 @@ setup_sandbox() {
   SANDBOX="$BATS_TEST_TMPDIR/sandbox"
   mkdir -p "$SANDBOX/bin" "$SANDBOX/etc"
 
+  # -f の書式で答え分けする。所有者・モードの検査に使うため。
+  # 既定は「root 所有・755」＝安全な置き先。
   cat >"$SANDBOX/bin/stat" <<'EOF'
 #!/bin/bash
-echo "testuser"
+case "$*" in
+  *"%u"*)  echo 0 ;;
+  *"%Lp"*) echo 755 ;;
+  *)       echo "testuser" ;;
+esac
 EOF
   cat >"$SANDBOX/bin/id" <<'EOF'
 #!/bin/bash
@@ -207,6 +213,20 @@ stderr_text() { cat "$SANDBOX/stderr" 2>/dev/null; }
 
 # ログファイルの中身（status が見せるのはこちら）
 log_text() { cat "$SANDBOX/enddayd.log" 2>/dev/null; }
+
+# 置き先のディレクトリが root 以外から書ける状態を模す
+# （Homebrew を入れた Intel Mac の /usr/local が該当することがある）
+make_bin_dir_unsafe() {
+  cat >"$SANDBOX/bin/stat" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *"%u"*)  echo 501 ;;
+  *"%Lp"*) echo 775 ;;
+  *)       echo "testuser" ;;
+esac
+EOF
+  chmod +x "$SANDBOX/bin/stat"
+}
 
 # 今日だけの調整ファイルを置く
 write_today_file() { printf '%s\n' "$@" >"$SANDBOX/etc/today"; }

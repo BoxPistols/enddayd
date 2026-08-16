@@ -2,8 +2,14 @@
 #
 # メニューバーアプリのビルド。フル Xcode は不要（Command Line Tools で通る）。
 #
-#   ./build.sh          → dist/Enddayd.app
-#   ./build.sh --run    → ビルドして起動
+#   ./build.sh            → dist/Enddayd.app
+#   ./build.sh --run      → ビルドして dist から起動（動作確認用）
+#   ./build.sh --install  → ビルドして /Applications に入れ直して起動（常用はこちら）
+#
+# 常用するなら --install を使うこと。dist/ から起動したままにすると、
+# 次に ./build.sh を打った時点で「いま動いているアプリ」が消える
+# （このスクリプトは冒頭で build と dist を作り直す）。
+# ログイン項目もそのパスで登録されるので、リポジトリを移動すると壊れる。
 #
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -47,6 +53,17 @@ codesign --verify "$APP"
 lipo -info "$APP/Contents/MacOS/Enddayd"
 echo "built: $PWD/$APP"
 
-if [ "${1:-}" = "--run" ]; then
-  open "$APP"
-fi
+case "${1:-}" in
+  --run)
+    open "$APP"
+    ;;
+  --install)
+    # 同じ名前のアプリが2つあると、二重起動を防ぐ仕組みのせいで
+    # 「どちらを操作しているか分からない」状態になる。1つに寄せる。
+    osascript -e 'quit app "Enddayd"' >/dev/null 2>&1 || true
+    rm -rf /Applications/Enddayd.app
+    cp -R "$APP" /Applications/
+    echo "installed: /Applications/Enddayd.app"
+    open /Applications/Enddayd.app
+    ;;
+esac

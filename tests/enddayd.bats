@@ -830,3 +830,26 @@ EOF
   not_contains "$output" "out of window"
   not_contains "$output" "stage="
 }
+
+# --- 置き先の安全性 -----------------------------------------------------
+#
+# launchd は $BIN を root で実行する。置き先ディレクトリに書ける人がいれば、
+# その人は中身を差し替えて root 実行を取れる。ファイルを root:wheel 644 に
+# しても、親に書ければ置き換えられるので意味がない。
+
+# root 以外から書けるディレクトリには配置しない
+@test "install: refuses a target directory writable by non root" {
+  make_bin_dir_unsafe
+  run as_root_installable bash "$SCRIPT" install
+  [ "$status" -ne 0 ]
+  contains "$output" "root 以外から書き換えられる"
+  contains "$output" "chown root:wheel"
+  [ ! -f "$SANDBOX/installed/enddayd.sh" ]   # 置いていない
+}
+
+# 通常（root 所有・755）なら通る
+@test "install: accepts a root owned target directory" {
+  run as_root_installable bash "$SCRIPT" install
+  [ "$status" -eq 0 ]
+  [ -f "$SANDBOX/installed/enddayd.sh" ]
+}

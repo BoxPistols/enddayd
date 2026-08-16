@@ -666,6 +666,18 @@ write_newsyslog() {
     rm -f "$tmp"; echo "$NEWSYSLOG を更新できませんでした（ログは伸び続けます）" >&2; return 1
   fi
   chmod 644 "$NEWSYSLOG" 2>/dev/null || true
+
+  # 置けたことと、newsyslog が読めることは別。ここは root で走っているので
+  # その場で確かめられる（-n はドライランなので何も回さない）。
+  # 確かめずに置くと、書式が違っても誰も気づかないままログが伸び続ける。
+  if command -v newsyslog >/dev/null 2>&1; then
+    if newsyslog -n -f "$NEWSYSLOG" >/dev/null 2>&1; then
+      log "newsyslog config accepted: $NEWSYSLOG"
+    else
+      log "newsyslog config rejected: ${NEWSYSLOG}（ログのローテーションは効きません）"
+      echo "警告: $NEWSYSLOG を newsyslog が読めませんでした。ログは伸び続けます" >&2
+    fi
+  fi
   return 0
 }
 
@@ -691,6 +703,25 @@ install_self() {
     if ! install -d -m 755 -o root -g wheel "$dir"; then
       echo "$dir を作成できませんでした" >&2; return 1
     fi
+  fi
+
+  # 置き先のディレクトリが root 以外に書けるなら配置しない。
+  #
+  # launchd は $BIN を root で実行する。ディレクトリに書ける人がいれば、
+  # その人は中身を差し替えて root 実行を取れる。Homebrew を入れた Intel Mac は
+  # /usr/local が一般ユーザー所有になっていることがあり、これは珍しくない。
+  # ファイル自身を root:wheel 644 にしても、親に書ければ置き換えられる。
+  local owner mode
+  owner=$(/usr/bin/stat -f '%u' "$dir" 2>/dev/null)
+  mode=$(/usr/bin/stat -f '%Lp' "$dir" 2>/dev/null)
+  if [ "$owner" != "0" ] || [ $((8#${mode:-777} & 8#022)) -ne 0 ]; then
+    {
+      echo "$dir が root 以外から書き換えられる状態です（所有者 uid=${owner:-不明} / モード ${mode:-不明}）"
+      echo "  root で実行される本体を置く場所としては危険なので中止しました。"
+      echo "  直す: sudo chown root:wheel $dir && sudo chmod 755 $dir"
+      echo "  Homebrew を入れた Intel Mac ではこの状態になっていることがあります。"
+    } >&2
+    return 1
   fi
   # 既に $BIN 自身を実行しているときは何もしない（install は同一ファイルを拒む）
   [ "$self" = "$BIN" ] && return 0

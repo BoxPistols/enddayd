@@ -220,10 +220,10 @@ sudo rm -f /Library/LaunchDaemons/local.enddayd.plist
 
 ```bash
 cd menubar
-./build.sh
-cp -R dist/Enddayd.app /Applications/
-open /Applications/Enddayd.app
+./build.sh --install     # /Applications に入れ直して起動する
 ```
+
+`--install` を使ってください。`dist/` から起動したままにすると、**次に `./build.sh` を打った時点でいま動いているアプリが消えます**（ビルドは `dist` を作り直すため）。「ログイン時に起動」もそのパスで登録されるので、リポジトリを移動すると壊れます。ビルドだけしたいときは引数なし、`dist` から一度だけ試すなら `--run` です。
 
 Xcode は不要で、Command Line Tools だけで通ります（Swift 6 / SwiftUI、arm64 と x86_64 のユニバーサル）。
 
