@@ -7,6 +7,7 @@
 #   sudo ./enddayd.sh config           現在の設定を表示
 #   sudo ./enddayd.sh reload           設定ファイルを手で編集した後に反映
 #   sudo ./enddayd.sh dryrun on|off    ドライランの切り替え
+#   sudo ./enddayd.sh today [...]      今日だけの調整（延長・レベル）。翌日は自動で戻る
 #   sudo ./enddayd.sh status           状態と直近のログ
 #   sudo ./enddayd.sh rehearsal [秒]   全段階を圧縮して今すぐ確認
 #   sudo ./enddayd.sh stage <名前>     単一ステージだけ確認
@@ -34,6 +35,17 @@ ERRLOG=/var/log/enddayd.err.log
 BYPASS=/etc/enddayd.skip
 DRYFLAG=/etc/enddayd.dryrun
 NEWSYSLOG=/etc/newsyslog.d/enddayd.conf
+TODAY_FILE=/etc/enddayd.today
+
+# 「今日だけ」の延長で選べる分数。
+#
+# 任意の分数にできない理由: launchd のトリガは plist に固定で書いてある。
+# 強制終了を後ろへずらすには、ずらした先にも発火が要る。だから選べる値と
+# 受け皿のトリガを1対1で対応させ、gen_plist が両方を出す。
+#
+# 上限を 120 分にしてあるのは、いくらでも延ばせるなら当日スキップと
+# 変わらなくなるため。緩めるための仕組みが、素通しの仕組みになっては困る。
+EXTEND_SLOTS="30 60 90 120"
 
 GRACE_SOUND=/System/Library/Sounds/Sosumi.aiff
 FINAL_SOUND=/System/Library/Sounds/Basso.aiff
@@ -91,6 +103,8 @@ need_root() {
 lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
 to_min() { local h="${1%%:*}" m="${1##*:}"; echo $((10#$h * 60 + 10#$m)); }
+
+to_hhmm() { printf '%02d:%02d\n' $(($1 / 60)) $(($1 % 60)); }
 
 valid_time() { echo "$1" | grep -Eq '^([01][0-9]|2[0-3]):[0-5][0-9]$'; }
 
@@ -274,6 +288,79 @@ require_valid_conf() {
   return 1
 }
 
+# ------------------------------------------------------ 今日だけの調整 ---
+#
+# 当日スキップと同じく日付印を押す。翌日は日付が合わないので勝手に失効する。
+# 「緩めたまま戻し忘れる」が起きない形にしておくのがこのツールの前提。
+#
+# 延長は強制終了だけを後ろへずらす。予告・警告・最終通告は動かさない。
+# 延ばすかどうかは普通、警告を見てから決めるので、先頭を動かすと
+# 決める前に決めさせることになる。
+
+TODAY_EXTEND=0
+TODAY_LEVEL=""
+TODAY_ERROR=""
+
+# /etc/enddayd.today を読む。壊れていても走行は止めない（緩める側の指定なので、
+# 無視すれば元の（厳しい）スケジュールで動く）。理由はログに残す。
+read_today() {
+  TODAY_EXTEND=0
+  TODAY_LEVEL=""
+  TODAY_ERROR=""
+  [ -f "$TODAY_FILE" ] || return 0
+
+  local line key value stamp="" ext="" lv=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|\#*) continue ;; esac
+    key="${line%%=*}"; value="${line#*=}"
+    case "$key" in
+      DATE)   stamp="$value" ;;
+      EXTEND) ext="$value" ;;
+      LEVEL)  lv="$value" ;;
+    esac
+  done <"$TODAY_FILE"
+
+  if [ "$stamp" != "$(date +%F)" ]; then
+    return 0   # 昨日以前のもの。黙って無効（そういう設計）
+  fi
+
+  if [ -n "$ext" ]; then
+    case " $EXTEND_SLOTS " in
+      *" $ext "*) TODAY_EXTEND="$ext" ;;
+      *) TODAY_ERROR="EXTEND は $EXTEND_SLOTS のいずれかです: \"$ext\"" ;;
+    esac
+  fi
+
+  if [ -n "$lv" ]; then
+    case "$lv" in
+      notify|soft|normal|hard) TODAY_LEVEL="$lv" ;;
+      *) TODAY_ERROR="${TODAY_ERROR:+$TODAY_ERROR / }LEVEL は notify / soft / normal / hard のいずれかです: \"$lv\"" ;;
+    esac
+  fi
+
+  # 日をまたぐ延長は受けない。翌日の曜日判定をどう扱うかが決まっていないので、
+  # 中途半端に効かせるより効かせないほうが読みやすい。
+  if [ "$TODAY_EXTEND" -gt 0 ] 2>/dev/null; then
+    local last
+    last=$(to_min "${T_ARR[3]}")
+    if [ $((last + TODAY_EXTEND + KILL_GRACE)) -gt $((24 * 60 - 1)) ]; then
+      TODAY_ERROR="${TODAY_ERROR:+$TODAY_ERROR / }延長すると日をまたぐので受け付けません（${T_ARR[3]} + ${TODAY_EXTEND}分 + 猶予${KILL_GRACE}分）"
+      TODAY_EXTEND=0
+    fi
+  fi
+
+  [ -n "$TODAY_ERROR" ] && TODAY_EXTEND=0
+  return 0
+}
+
+# 今日だけの調整を人が読む形で1行にする。無ければ空。
+today_summary() {
+  local parts=""
+  [ "$TODAY_EXTEND" -gt 0 ] 2>/dev/null && parts="強制終了を ${TODAY_EXTEND}分 延長"
+  [ -n "$TODAY_LEVEL" ] && parts="${parts:+$parts / }レベルを ${TODAY_LEVEL} に変更"
+  echo "$parts"
+}
+
 stage_min() {
   case "$1" in
     notice) to_min "${T_ARR[0]}" ;;
@@ -323,14 +410,29 @@ cmd_run() {
   if [ -n "$FORCE_MIN" ]; then MIN="$FORCE_MIN"
   else MIN=$((10#$(date +%H) * 60 + 10#$(date +%M))); fi
 
-  local M0 M1 M2 M3 STAGE
+  # 今日だけの調整。壊れていても走行は止めない（緩める側の指定なので、
+  # 無視すれば元の厳しいスケジュールで動く）。理由だけ残す。
+  read_today
+  [ -n "$TODAY_ERROR" ] && log "today override ignored: $TODAY_ERROR"
+  [ -n "$TODAY_LEVEL" ] && LEVEL="$TODAY_LEVEL"
+
+  local M0 M1 M2 M3 MK KILL_AT STAGE
   M0=$(to_min "${T_ARR[0]}"); M1=$(to_min "${T_ARR[1]}")
   M2=$(to_min "${T_ARR[2]}"); M3=$(to_min "${T_ARR[3]}")
+  MK=$((M3 + TODAY_EXTEND))          # 今日の実際の強制終了時刻
+  KILL_AT=$(to_hhmm "$MK")
+
+  # 延長中は、元の強制終了時刻のトリガと途中の受け皿では何もしない。
+  # ここで final を出し直すと最終通告が二重に出る。
+  if [ "$TODAY_EXTEND" -gt 0 ] && [ "$MIN" -ge "$M3" ] && [ "$MIN" -lt "$MK" ]; then
+    log "extended: enforce moved to $KILL_AT (+${TODAY_EXTEND}m)"
+    exit 0
+  fi
 
   if   [ "$MIN" -ge "$M0" ] && [ "$MIN" -lt "$M1" ]; then STAGE=notice
   elif [ "$MIN" -ge "$M1" ] && [ "$MIN" -lt "$M2" ]; then STAGE=warn
-  elif [ "$MIN" -ge "$M2" ] && [ "$MIN" -lt "$M3" ]; then STAGE=final
-  elif [ "$MIN" -ge "$M3" ] && [ "$MIN" -le $((M3 + KILL_GRACE)) ]; then STAGE=enforce
+  elif [ "$MIN" -ge "$M2" ] && [ "$MIN" -lt "$MK" ]; then STAGE=final
+  elif [ "$MIN" -ge "$MK" ] && [ "$MIN" -le $((MK + KILL_GRACE)) ]; then STAGE=enforce
   else log "skip: out of window (min=$MIN)"; exit 0; fi
 
   log "stage=$STAGE level=$LEVEL user=$CONSOLE_USER"
@@ -347,14 +449,14 @@ cmd_run() {
     notice)
       play "$GRACE_SOUND"
       alert "$(mark "${T_ARR[0]} — 終業時刻です")" \
-            "作業を切り上げる準備を始めてください。${T_ARR[3]} に終了します。" 30
+            "作業を切り上げる準備を始めてください。${KILL_AT} に終了します。" 30
       log "notice shown"
       ;;
 
     warn)
       play "$GRACE_SOUND"
       alert "$(mark "${T_ARR[1]} — ここで終わりです")" \
-            "コミット・保存を済ませてください。${T_ARR[3]} に強制的に終了します。" 45
+            "コミット・保存を済ませてください。${KILL_AT} に強制的に終了します。" 45
       local apps
       if [ "$LOGOUT_ATTEMPT" != "1" ]; then
         log "logout attempt disabled"
@@ -393,7 +495,7 @@ cmd_run() {
       play "$FINAL_SOUND"
       if [ "$DRY" = "1" ]; then
         log "would execute level=$LEVEL"
-        alert "$(mark "${T_ARR[3]} — ここで終了します")" \
+        alert "$(mark "${KILL_AT} — ここで終了します")" \
               "本番ならこの時点で終了していました（レベル: ${LEVEL}）。まだ動いているのはドライラン中だからです。" 60
         exit 0
       fi
@@ -404,7 +506,7 @@ cmd_run() {
       case "$LEVEL" in
         notify)
           log "level=notify: 通知のみ"
-          alert "${T_ARR[3]} — 終業時刻です" "設定はレベル notify なので電源は落としません。" 60
+          alert "${KILL_AT} — 終業時刻です" "設定はレベル notify なので電源は落としません。" 60
           ;;
         soft)
           # soft は OS 側の終了確認ダイアログが出るので、こちらからは出さない。
@@ -417,14 +519,14 @@ cmd_run() {
           # 画面に理由を出してから落とす。スリープ復帰が猶予内に入ると
           # 予告も警告も見ないまま電源が落ちるため、無言だとクラッシュと
           # 区別が付かない。閉じても中断はされない。
-          alert "${T_ARR[3]} — 終了します" \
+          alert "${KILL_AT} — 終了します" \
                 "enddayd が終業時刻として電源を落とします。中断はできません。" "$ENFORCE_ALERT_SEC"
           sleep 2
           /sbin/shutdown -h now
           ;;
         hard)
           log "level=hard: セッションを畳んでから shutdown"
-          alert "${T_ARR[3]} — 終了します" \
+          alert "${KILL_AT} — 終了します" \
                 "enddayd が終業時刻として電源を落とします。保存していない変更は失われます。" "$ENFORCE_ALERT_SEC"
           /bin/launchctl bootout "gui/${CONSOLE_UID}" >/dev/null 2>&1
           sleep 3
@@ -444,13 +546,24 @@ cmd_run() {
 
 gen_plist() {
   require_valid_conf || return 1
-  local entries="" d t h m
+  local entries="" d t h m slot last at
+  last=$(to_min "${T_ARR[3]}")
   for d in "${W_ARR[@]}"; do
     for t in "${T_ARR[@]}"; do
       h=$((10#${t%%:*})); m=$((10#${t##*:}))
       entries+="    <dict><key>Weekday</key><integer>${d}</integer>"
       entries+="<key>Hour</key><integer>${h}</integer>"
       entries+="<key>Minute</key><integer>${m}</integer></dict>"$'\n'
+    done
+    # 「今日だけ延ばす」の受け皿。トリガは plist に固定で書くものなので、
+    # 延ばした先に発火が無ければ何も起きない。選べる分数と1対1で置く。
+    # 延長していない日は run が「窓の外」と判定して何もしない。
+    for slot in $EXTEND_SLOTS; do
+      at=$((last + slot))
+      [ "$at" -gt $((24 * 60 - 1)) ] && continue   # 日をまたぐぶんは置かない
+      entries+="    <dict><key>Weekday</key><integer>${d}</integer>"
+      entries+="<key>Hour</key><integer>$((at / 60))</integer>"
+      entries+="<key>Minute</key><integer>$((at % 60))</integer></dict>"$'\n'
     done
   done
 
@@ -784,7 +897,7 @@ cmd_uninstall() {
   /bin/launchctl bootout system "$PLIST" 2>/dev/null \
     || /bin/launchctl bootout "system/${LABEL}" 2>/dev/null \
     || true
-  rm -f "$PLIST" "$BIN" "$DRYFLAG" "$BYPASS" "$NEWSYSLOG"
+  rm -f "$PLIST" "$BIN" "$DRYFLAG" "$BYPASS" "$NEWSYSLOG" "$TODAY_FILE"
 
   if daemon_loaded; then
     echo "デーモンをまだ外せていません。次を実行してください:" >&2
@@ -793,6 +906,87 @@ cmd_uninstall() {
   fi
   echo "削除しました（設定 $CONF とログ $LOG は残しています）。"
   echo "設定も消すなら: sudo rm -f $CONF"
+}
+
+# 今日だけの調整。当日スキップと同じく日付印を押すので、翌日は勝手に失効する。
+cmd_today() {
+  need_root
+  require_valid_conf || exit 1
+  local action="${1:-show}" value="${2:-}"
+
+  case "$action" in
+    show)
+      read_today
+      [ -n "$TODAY_ERROR" ] && { echo "今日の調整は無視されます: $TODAY_ERROR" >&2; exit 1; }
+      local summary
+      summary=$(today_summary)
+      if [ -z "$summary" ]; then
+        echo "今日の調整: なし（通常のスケジュールで動きます）"
+      else
+        echo "今日の調整: $summary"
+        echo "強制終了  : $(to_hhmm $(( $(to_min "${T_ARR[3]}") + TODAY_EXTEND )))"
+        echo "明日には自動的に元へ戻ります。"
+      fi
+      ;;
+
+    extend)
+      case " $EXTEND_SLOTS " in
+        *" $value "*) ;;
+        *) echo "延長できるのは $EXTEND_SLOTS 分のいずれかです（受け皿のトリガと対になっているため）" >&2; exit 1 ;;
+      esac
+      write_today "$value" ""
+      ;;
+
+    level)
+      case "$value" in
+        notify|soft|normal|hard) ;;
+        *) echo "レベルは notify / soft / normal / hard のいずれかです" >&2; exit 1 ;;
+      esac
+      read_today
+      write_today "$TODAY_EXTEND" "$value"
+      ;;
+
+    clear)
+      rm -f "$TODAY_FILE"
+      echo "今日の調整を取り消しました。"
+      ;;
+
+    *)
+      echo "usage: sudo $0 today [show|extend <分>|level <名前>|clear]" >&2
+      echo "  延長できる分数: $EXTEND_SLOTS" >&2
+      exit 1 ;;
+  esac
+}
+
+# 上書きファイルを書く。書いたあとに読み直して、受け付けられたことを確かめる。
+# 「書けた」と「効く」は別なので、書けただけで成功と言わない。
+write_today() {
+  local extend="${1:-0}" level="${2:-}" tmp
+  tmp="${TODAY_FILE}.new.$$"
+  # 条件付きの出力を `[ … ] && echo` で書かないこと。グループの終了コードは
+  # 最後の要素のものなので、条件が偽なだけで「書き込みに失敗した」と
+  # 誤判定する（実際に踏んだ）。成否は書けたものを見て判断する。
+  {
+    echo "# enddayd が置いた当日限りの上書き。日付が変われば自動的に無効になる。"
+    echo "DATE=$(date +%F)"
+    if [ "$extend" -gt 0 ] 2>/dev/null; then echo "EXTEND=${extend}"; fi
+    if [ -n "$level" ]; then echo "LEVEL=${level}"; fi
+  } >"$tmp"
+  if [ ! -s "$tmp" ]; then
+    rm -f "$tmp"; echo "$TODAY_FILE を書けませんでした" >&2; exit 1
+  fi
+  chmod 644 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$TODAY_FILE" || { rm -f "$tmp"; echo "$TODAY_FILE を更新できませんでした" >&2; exit 1; }
+
+  read_today
+  if [ -n "$TODAY_ERROR" ]; then
+    rm -f "$TODAY_FILE"
+    echo "受け付けられませんでした: $TODAY_ERROR" >&2
+    exit 1
+  fi
+  echo "今日の調整: $(today_summary)"
+  echo "強制終了  : $(to_hhmm $(( $(to_min "${T_ARR[3]}") + TODAY_EXTEND )))"
+  echo "明日には自動的に元へ戻ります。"
 }
 
 cmd_dryrun() {
@@ -845,6 +1039,15 @@ cmd_status() {
   else
     echo "デーモン    : 未登録"
   fi
+  read_today
+  local today_line
+  today_line=$(today_summary)
+  if [ -n "$TODAY_ERROR" ]; then
+    echo "今日の調整  : 無視されます（${TODAY_ERROR}）"
+  elif [ -n "$today_line" ]; then
+    echo "今日の調整  : ${today_line}（明日には戻ります）"
+  fi
+
   # ドライランの行には log() が [DRY] を付けるので、本番の到達だけを拾える。
   local reached
   reached=$(grep -Fv '[DRY]' "$LOG" 2>/dev/null | grep -F 'enforce reached' | tail -n 1)
@@ -897,6 +1100,7 @@ case "${1:-}" in
   uninstall)  cmd_uninstall ;;
   config)     cmd_config ;;
   dryrun)     cmd_dryrun "${2:-}" ;;
+  today)      cmd_today "${2:-show}" "${3:-}" ;;
   status)     cmd_status ;;
   rehearsal)  cmd_rehearsal "${2:-}" ;;
   stage)      cmd_stage "${2:-notice}" ;;

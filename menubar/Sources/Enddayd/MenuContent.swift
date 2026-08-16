@@ -46,6 +46,9 @@ struct MenuContent: View {
             if model.skipToday {
                 Text("今日はスキップ指定があります")
             }
+            if model.today.isActive {
+                Text("今日だけ: \(model.today.summary)（明日には戻ります）")
+            }
             ForEach(model.confWarnings, id: \.self) { warning in
                 Text("注意: \(warning)")
             }
@@ -80,6 +83,22 @@ struct MenuContent: View {
         } else {
             Button("今日はスキップ") { model.skipTodayOn() }
         }
+
+        // 今日だけの調整。恒久的な設定変更とは別の場所に置く。
+        // 同じ場所に混ぜると「今日だけのつもりが毎日変わった」が起きる。
+        Menu("今日だけ調整する") {
+            ForEach(model.allowedExtendSlots, id: \.self) { minutes in
+                Button("強制終了を \(minutes)分 延ばす") { model.extendToday(minutes) }
+            }
+            Divider()
+            Button("今日はレベルを notify にする（落とさない）") { model.setTodayLevel(.notify) }
+            Button("今日はレベルを soft にする（拒否できる）") { model.setTodayLevel(.soft) }
+            if model.today.isActive {
+                Divider()
+                Button("今日の調整を取り消す") { model.clearToday() }
+            }
+        }
+        .disabled(model.busy)
 
         Button("時刻・曜日・レベルを変更…") {
             openWindow(id: "schedule")

@@ -16,6 +16,7 @@ final class DaemonModel: ObservableObject {
     nonisolated static let confPath  = "/etc/enddayd.conf"
     nonisolated static let dryPath   = "/etc/enddayd.dryrun"
     nonisolated static let skipPath  = "/etc/enddayd.skip"
+    nonisolated static let todayPath = "/etc/enddayd.today"
     nonisolated static let logPath   = "/var/log/enddayd.log"
 
     // --- 読み取った状態 ---
@@ -25,6 +26,7 @@ final class DaemonModel: ObservableObject {
     @Published private(set) var conf = ConfState()
     @Published private(set) var confWarnings: [String] = []
     @Published private(set) var logFacts = LogFacts()
+    @Published private(set) var today = TodayOverride()
 
     /// launchd に実際に登録されているか。ファイルの有無とは別で、
     /// plist が残ったまま外れている状態を見分けるために要る。
@@ -42,6 +44,19 @@ final class DaemonModel: ObservableObject {
     var killGrace: Int { conf.killGrace }
     var confBroken: Bool { conf.isBroken }
     var confProblems: [String] { conf.problems }
+
+    /// 今日だけの調整で、実際に受け付けてもらえる延長。
+    /// 日をまたぐぶんはデーモンが拒否するのでメニューにも出さない。
+    var allowedExtendSlots: [Int] {
+        TodayOverrideParser.allowedSlots(lastEnforce: conf.times[3], killGrace: conf.killGrace)
+    }
+
+    /// 今日の実際の強制終了時刻（延長を含む）
+    var effectiveEnforceTime: String {
+        guard let base = ConfParser.minutes(of: conf.times[3]) else { return conf.times[3] }
+        let at = base + today.extendMinutes
+        return String(format: "%02d:%02d", at / 60, at % 60)
+    }
 
     var logTail: [String] { logFacts.tail }
     var lastEnforce: String? { logFacts.lastEnforce }
@@ -67,14 +82,15 @@ final class DaemonModel: ObservableObject {
         installed = fm.fileExists(atPath: Self.binPath) && fm.fileExists(atPath: Self.plistPath)
         dryRun = fm.fileExists(atPath: Self.dryPath)
 
-        let today = Self.dateFormatter.string(from: Date())
+        let todayStamp = Self.dateFormatter.string(from: Date())
         if let skip = try? String(contentsOfFile: Self.skipPath, encoding: .utf8) {
-            skipToday = skip.trimmingCharacters(in: .whitespacesAndNewlines) == today
+            skipToday = skip.trimmingCharacters(in: .whitespacesAndNewlines) == todayStamp
         } else {
             skipToday = false
         }
 
         readConf()
+        readToday()
         readLog()
         refreshProbes()
     }
@@ -87,6 +103,14 @@ final class DaemonModel: ObservableObject {
         }
         conf = ConfParser.parse(text)
         confWarnings = ConfParser.warnings(for: conf)
+    }
+
+    private func readToday() {
+        guard let text = try? String(contentsOfFile: Self.todayPath, encoding: .utf8) else {
+            today = TodayOverride()
+            return
+        }
+        today = TodayOverrideParser.parse(text, today: Self.dateFormatter.string(from: Date()))
     }
 
     private func readLog() {
@@ -221,6 +245,19 @@ final class DaemonModel: ObservableObject {
             ? Self.binPath
             : (Self.bundledScriptPath ?? Self.binPath)
         adminAction("/bin/bash \(Admin.shQuote(script)) uninstall")
+    }
+
+    /// 今日だけの調整。書き込みは enddayd.sh に任せる（検証を1か所に集める）。
+    func extendToday(_ minutes: Int) {
+        adminAction("/bin/bash \(Admin.shQuote(Self.binPath)) today extend \(minutes)")
+    }
+
+    func setTodayLevel(_ level: EnforceLevel) {
+        adminAction("/bin/bash \(Admin.shQuote(Self.binPath)) today level \(level.rawValue)")
+    }
+
+    func clearToday() {
+        adminAction("/bin/bash \(Admin.shQuote(Self.binPath)) today clear")
     }
 
     func rehearsal() {

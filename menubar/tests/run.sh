@@ -21,9 +21,11 @@ swiftc -parse-as-library -swift-version 6 \
   Sources/Enddayd/EnforceLevel.swift \
   Sources/Enddayd/ConfParser.swift \
   Sources/Enddayd/LogReader.swift \
+  Sources/Enddayd/TodayOverride.swift \
   tests/Harness.swift \
   tests/ConfParserTests.swift \
   tests/LogReaderTests.swift \
+  tests/TodayOverrideTests.swift \
   tests/TestMain.swift
 
 "$OUT/tests"

@@ -76,6 +76,7 @@ EOF
     -e "s#^DRYFLAG=.*#DRYFLAG=$SANDBOX/etc/dryrun#" \
     -e "s#^CONF=.*#CONF=$SANDBOX/etc/conf#" \
     -e "s#^NEWSYSLOG=.*#NEWSYSLOG=$SANDBOX/etc/newsyslog.d/enddayd.conf#" \
+    -e "s#^TODAY_FILE=.*#TODAY_FILE=$SANDBOX/etc/today#" \
     -e "s#^GRACE_SOUND=.*#GRACE_SOUND=$SANDBOX/sound#" \
     -e "s#^FINAL_SOUND=.*#FINAL_SOUND=$SANDBOX/sound#" \
     "$BATS_TEST_DIRNAME/../enddayd.sh" >"$SCRIPT"
@@ -206,3 +207,6 @@ stderr_text() { cat "$SANDBOX/stderr" 2>/dev/null; }
 
 # ログファイルの中身（status が見せるのはこちら）
 log_text() { cat "$SANDBOX/enddayd.log" 2>/dev/null; }
+
+# 今日だけの調整ファイルを置く
+write_today_file() { printf '%s\n' "$@" >"$SANDBOX/etc/today"; }

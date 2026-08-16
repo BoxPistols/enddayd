@@ -26,6 +26,7 @@ swiftc -parse-as-library -swift-version 6 -o "$BIN" \
   Sources/Enddayd/EnforceLevel.swift \
   Sources/Enddayd/ConfParser.swift \
   Sources/Enddayd/LogReader.swift \
+  Sources/Enddayd/TodayOverride.swift \
   Sources/Enddayd/DaemonProbe.swift \
   Sources/Enddayd/Admin.swift \
   Sources/Enddayd/DaemonModel.swift \

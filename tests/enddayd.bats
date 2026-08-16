@@ -289,7 +289,30 @@ setup() {
   run bash "$SCRIPT" plist
   [ "$status" -eq 0 ]
   count=$(echo "$output" | grep -c "<key>Weekday</key>")
-  [ "$count" -eq 28 ]   # 7曜日 × 4時刻
+  [ "$count" -eq 56 ]   # 7曜日 × (4時刻 + 延長の受け皿4つ)
+}
+
+# 「今日だけ延ばす」の受け皿が置かれていること。
+# トリガは plist に固定で書くものなので、これが無いと延ばした先で
+# 何も起きない（延長の指定だけ残って、実際には落ちない）。
+@test "plist: has a catch trigger for every extension slot" {
+  run bash "$SCRIPT" plist
+  # 強制終了 18:50 に対して 19:20 / 19:50 / 20:20 / 20:50
+  contains "$output" "<key>Hour</key><integer>19</integer><key>Minute</key><integer>20</integer>"
+  contains "$output" "<key>Hour</key><integer>19</integer><key>Minute</key><integer>50</integer>"
+  contains "$output" "<key>Hour</key><integer>20</integer><key>Minute</key><integer>20</integer>"
+  contains "$output" "<key>Hour</key><integer>20</integer><key>Minute</key><integer>50</integer>"
+}
+
+# 日をまたぐ受け皿は置かない
+@test "plist: drops catch triggers that would cross midnight" {
+  write_conf_file 'TIMES="22:00,22:30,22:45,23:00"' 'WEEKDAYS="1"' \
+                  'LEVEL="normal"' 'KILL_GRACE="10"'
+  run bash "$SCRIPT" plist
+  count=$(echo "$output" | grep -c "<key>Weekday</key>")
+  [ "$count" -eq 5 ]   # 4時刻 + 置ける受け皿は 23:30 のみ（+60 以降は日をまたぐ）
+  contains "$output" "<key>Hour</key><integer>23</integer><key>Minute</key><integer>30</integer>"
+  not_contains "$output" "<key>Hour</key><integer>24</integer>"
 }
 
 # plist は run サブコマンドを呼ぶ
@@ -494,6 +517,131 @@ EOF
   [ "$status" -eq 0 ]
   [ -f "$SANDBOX/etc/dryrun" ]
   contains "$output" "ドライランのまま"
+}
+
+# --- 今日だけの調整 -----------------------------------------------------
+#
+# 当日スキップと同じく日付印を押す。翌日は日付が合わないので自動的に失効する。
+# 「緩めたまま戻し忘れる」が起きない形にしておくのがこのツールの前提。
+# 延長は強制終了だけを後ろへずらす（予告・警告・最終通告は動かさない）。
+
+# 延長中は元の強制終了時刻では落とさず、移動先を知らせる
+@test "today: the original enforce time does nothing while extended" {
+  write_today_file "DATE=$(date +%F)" "EXTEND=60"
+  run run_at 1130
+  contains "$output" "extended: enforce moved to 19:50"
+  not_contains "$output" "stage=enforce"
+  not_contains "$output" "stage=final"   # 最終通告を二重に出さない
+}
+
+# 延長先では実際に落とす
+@test "today: the extended time enforces" {
+  write_today_file "DATE=$(date +%F)" "EXTEND=60"
+  run run_at 1190
+  contains "$output" "stage=enforce"
+}
+
+# 猶予は延長先から数える
+@test "today: the grace window follows the extended time" {
+  write_today_file "DATE=$(date +%F)" "EXTEND=60"
+  run run_at 1200
+  contains "$output" "stage=enforce"
+  run run_at 1201
+  contains "$output" "out of window"
+}
+
+# 予告・警告は動かさない（延ばすかは警告を見てから決めるもの）
+@test "today: the earlier stages keep their times" {
+  write_today_file "DATE=$(date +%F)" "EXTEND=60"
+  run run_at 1080
+  contains "$output" "stage=notice"
+  run run_at 1110
+  contains "$output" "stage=warn"
+}
+
+# 案内する時刻は延長後のもの。元の時刻を告げたら延ばした意味がない
+@test "today: the announced time is the extended one" {
+  write_today_file "DATE=$(date +%F)" "EXTEND=60"
+  run run_at 1080
+  contains "$output" "stage=notice"
+  run as_root bash "$SCRIPT" today
+  contains "$output" "19:50"
+}
+
+# 昨日の指定は勝手に失効する。戻し忘れが起きない
+@test "today: yesterday's override expires on its own" {
+  write_today_file "DATE=2000-01-01" "EXTEND=60"
+  run run_at 1130
+  contains "$output" "stage=enforce"
+  not_contains "$output" "extended"
+}
+
+# 受け皿のない分数は受け付けない（指定だけ残って落ちない状態を作らない）
+@test "today: an extension without a catch trigger is refused" {
+  run as_root bash "$SCRIPT" today extend 45
+  [ "$status" -ne 0 ]
+  contains "$output" "30 60 90 120"
+}
+
+# 壊れた指定は無視して、元の（厳しい）スケジュールで走る
+@test "today: a broken override is ignored and the run continues" {
+  write_today_file "DATE=$(date +%F)" "EXTEND=999"
+  run run_at 1130
+  contains "$output" "today override ignored"
+  contains "$output" "stage=enforce"
+}
+
+# 日をまたぐ延長は受けない
+@test "today: an extension crossing midnight is refused" {
+  write_conf_file 'TIMES="22:00,22:30,22:45,23:00"' 'WEEKDAYS="1,2,3,4,5,6,7"' \
+                  'LEVEL="normal"' 'KILL_GRACE="10"'
+  run as_root bash "$SCRIPT" today extend 60
+  [ "$status" -ne 0 ]
+  contains "$output" "日をまた"
+  [ ! -f "$SANDBOX/etc/today" ]   # 受け付けなかったものを残さない
+}
+
+# レベルだけ今日だけ差し替える
+@test "today: the level override applies to the enforce stage" {
+  write_today_file "DATE=$(date +%F)" "LEVEL=notify"
+  run run_at 1130
+  contains "$output" "level=notify"
+  not_contains "$output" "level=normal"
+}
+
+# 取り消せる
+@test "today: clear removes the override" {
+  write_today_file "DATE=$(date +%F)" "EXTEND=60"
+  run as_root bash "$SCRIPT" today clear
+  [ "$status" -eq 0 ]
+  [ ! -f "$SANDBOX/etc/today" ]
+  run run_at 1130
+  contains "$output" "stage=enforce"
+}
+
+# status に出る。ログを見なくても今日が緩んでいることが分かる
+@test "today: status shows the override" {
+  write_today_file "DATE=$(date +%F)" "EXTEND=60" "LEVEL=notify"
+  run bash "$SCRIPT" status
+  local line
+  line=$(echo "$output" | grep '今日の調整')
+  contains "$line" "60分"
+  contains "$line" "notify"
+  contains "$line" "明日には戻ります"
+}
+
+# 調整が無ければ status に行を足さない（常に出ると読まれなくなる）
+@test "today: status stays quiet without an override" {
+  run bash "$SCRIPT" status
+  not_contains "$output" "今日の調整"
+}
+
+# 削除時に当日ファイルも消す
+@test "today: uninstall removes the override file" {
+  write_today_file "DATE=$(date +%F)" "EXTEND=60"
+  run as_root bash "$SCRIPT" uninstall
+  [ "$status" -eq 0 ]
+  [ ! -f "$SANDBOX/etc/today" ]
 }
 
 # --- 有効だが効き方が違う設定 -------------------------------------------
