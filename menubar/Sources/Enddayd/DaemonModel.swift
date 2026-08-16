@@ -94,7 +94,7 @@ final class DaemonModel: ObservableObject {
             logFacts = LogFacts()
             return
         }
-        logFacts = LogReader.facts(text)
+        logFacts = LogReader.facts(text, today: Self.dateFormatter.string(from: Date()))
     }
 
     /// 外部プロセスとファイル比較は背景でやる。30秒ごとに主スレッドを

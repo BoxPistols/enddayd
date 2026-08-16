@@ -13,6 +13,7 @@ enum LogReaderTests {
         自動化の許可(&t)
         末尾(&t)
         行の長さ(&t)
+        日付の省略(&t)
     }
 
     private static func 本番の到達(_ t: inout Harness) {
@@ -100,5 +101,34 @@ enum LogReaderTests {
         let japanese = String(repeating: "あ", count: LogReader.tailLineLimit + 10)
         t.equal(LogReader.facts(japanese).tail.first?.count, LogReader.tailLineLimit,
                 "a multibyte line is counted in characters")
+    }
+
+    /// メニューの幅を決めているのはログ行。今日の行の日付は情報を持たないので落とす。
+    private static func 日付の省略(_ t: inout Harness) {
+        let line = "2026-08-16 05:16:41 [DRY] stage=enforce level=soft user=ai"
+
+        t.equal(LogReader.facts(line, today: "2026-08-16").tail,
+                ["05:16:41 [DRY] stage=enforce level=soft user=ai"],
+                "today's date is dropped from the shown line")
+
+        // 別の日の行は日付を残す（いつのものか分からなくなる）
+        t.equal(LogReader.facts(line, today: "2026-08-17").tail, [line],
+                "another day keeps its date")
+
+        // today を渡さなければ何もしない（ログそのものは変えない）
+        t.equal(LogReader.facts(line).tail, [line], "without today nothing is stripped")
+
+        // 日付を落としてから長さを測る（先に測ると無駄に切れる）
+        let long = "2026-08-16 05:16:41 [DRY] running apps: "
+            + (1...20).map { "App\($0)" }.joined(separator: ", ")
+        let shown = LogReader.facts(long, today: "2026-08-16").tail.first ?? ""
+        t.expect(shown.hasPrefix("05:16:41"), "the date is dropped before truncating", shown)
+        t.equal(shown.count, LogReader.tailLineLimit, "the result still respects the limit")
+
+        // 到達記録は表示用の丸めを受けない（日時がそのまま要る）
+        let reached = "2026-08-16 18:50:01 enforce reached level=normal"
+        t.equal(LogReader.facts(reached, today: "2026-08-16").lastEnforce,
+                "2026-08-16 18:50:01 level=normal",
+                "the enforce record keeps its full date")
     }
 }

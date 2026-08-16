@@ -29,7 +29,21 @@ enum LogReader {
     /// メニュー全体が画面いっぱいに広がる。
     static let tailLineLimit = 64
 
-    static func facts(_ text: String, tailCount: Int = 3, lineLimit: Int = tailLineLimit) -> LogFacts {
+    /// 当日の行から日付を落として時刻だけにする。
+    ///
+    /// メニューの幅は一番長い項目で決まり、いまはログ行が決めている。
+    /// `2026-08-16 05:16:41 [DRY] …` の先頭 11 文字は、今日の行なら情報を
+    /// 持たない。別の日の行は日付を残す（いつのものか分からなくなるため）。
+    static func shortenTimestamp(_ line: String, today: String) -> String {
+        let prefix = today + " "
+        guard line.hasPrefix(prefix) else { return line }
+        return String(line.dropFirst(prefix.count))
+    }
+
+    static func facts(_ text: String,
+                      tailCount: Int = 3,
+                      lineLimit: Int = tailLineLimit,
+                      today: String? = nil) -> LogFacts {
         var facts = LogFacts()
         // 区切りは isNewline で見る（CRLF は Swift では 1 文字なので、
         // "\n" や "\r" との比較では取りこぼす）
@@ -38,7 +52,10 @@ enum LogReader {
             .map(String.init)
             .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
 
-        facts.tail = lines.suffix(tailCount).map { truncate($0, to: lineLimit) }
+        facts.tail = lines.suffix(tailCount).map { line in
+            let shown = today.map { shortenTimestamp(line, today: $0) } ?? line
+            return truncate(shown, to: lineLimit)
+        }
 
         if let line = lines.last(where: { !$0.contains(dryMarker) && $0.contains(enforceMarker) }) {
             facts.lastEnforce = line.replacingOccurrences(of: enforceMarker, with: "")
