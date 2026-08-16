@@ -139,6 +139,16 @@ console_alert() {
   return 0
 }
 
+# 警告段階のログアウト試行は macOS の「自動化」の許可を要求する。許可が
+# 無いと毎回失敗するが、設計上そこで止まらないので気づきにくい。
+# 副作用のない問い合わせで到達可否だけを確かめる。成功すれば前面アプリの
+# 一覧を返すので、ドライランではそれをそのままログに出す。
+automation_probe() {
+  asuser /usr/bin/osascript -e \
+    'tell application "System Events" to get name of every application process whose background only is false' \
+    2>/dev/null
+}
+
 # --------------------------------------------------------- 設定の検証 ---
 # conf は README で手編集を案内している。setup の対話を通らない経路が
 # あるので、読み込んだ直後に必ず検証する。壊れた設定のまま走ると
@@ -309,19 +319,29 @@ cmd_run() {
       play "$GRACE_SOUND"
       alert "$(mark "${T_ARR[1]} — ここで終わりです")" \
             "コミット・保存を済ませてください。${T_ARR[3]} に強制的に終了します。" 45
+      local apps
       if [ "$LOGOUT_ATTEMPT" != "1" ]; then
         log "logout attempt disabled"
       elif [ "$DRY" = "1" ]; then
         log "would request logout"
-        log "running apps: $(asuser /usr/bin/osascript -e \
-          'tell application "System Events" to get name of every application process whose background only is false' \
-          2>/dev/null)"
+        # 許可の有無までドライランで見ておかないと、リハーサルが全部通っても
+        # 本番のログアウト試行だけが毎回失敗する状態に気づけない。
+        if apps=$(automation_probe); then
+          log "automation ok: System Events に到達できました"
+          log "running apps: $apps"
+        else
+          log "automation denied: System Events を操作できません（本番のログアウト試行は失敗します）"
+          log "許可は システム設定 > プライバシーとセキュリティ > 自動化 で与えます"
+        fi
       else
         # ここは意図的に「止まってよい」経路。拒否されたら保存の機会になる。
         if asuser /usr/bin/osascript -e 'tell application "System Events" to log out' >/dev/null 2>&1; then
           log "logout requested"
+        elif automation_probe >/dev/null; then
+          # System Events には届いた。つまり許可はあり、断ったのはアプリ側。
+          log "logout request failed: アプリが拒否した可能性があります"
         else
-          log "logout request failed (自動化の許可 or アプリが拒否)"
+          log "logout request failed: automation denied（システム設定 > プライバシーとセキュリティ > 自動化 で許可してください）"
         fi
       fi
       ;;
@@ -341,6 +361,10 @@ cmd_run() {
               "本番ならこの時点で終了していました（レベル: ${LEVEL}）。まだ動いているのはドライラン中だからです。" 60
         exit 0
       fi
+      # 本番でここまで来たことを残す。導入しても「本当に効くのか」は
+      # 一度落ちるまで分からないので、status がこの行を見て経路の生死を出す。
+      # 別ファイルに持つとログと食い違うため、記録はログ1本に寄せる。
+      log "enforce reached level=$LEVEL"
       case "$LEVEL" in
         notify)
           log "level=notify: 通知のみ"
@@ -734,6 +758,14 @@ cmd_status() {
     echo "デーモン    : 登録済み"
   else
     echo "デーモン    : 未登録"
+  fi
+  # ドライランの行には log() が [DRY] を付けるので、本番の到達だけを拾える。
+  local reached
+  reached=$(grep -Fv '[DRY]' "$LOG" 2>/dev/null | grep -F 'enforce reached' | tail -n 1)
+  if [ -n "$reached" ]; then
+    echo "本番到達    : ${reached/enforce reached /}"
+  else
+    echo "本番到達    : まだありません（強制終了の経路は未確認）"
   fi
   [ -f "$BYPASS" ] && echo "スキップ指定: $(cat "$BYPASS")"
   echo "--- 直近のログ ---"
