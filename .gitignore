@@ -3,3 +3,4 @@
 *.plist.bak
 menubar/build/
 menubar/dist/
+menubar/snapshots/

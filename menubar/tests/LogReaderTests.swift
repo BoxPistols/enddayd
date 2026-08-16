@@ -12,6 +12,7 @@ enum LogReaderTests {
         ドライランの除外(&t)
         自動化の許可(&t)
         末尾(&t)
+        行の長さ(&t)
     }
 
     private static func 本番の到達(_ t: inout Harness) {
@@ -76,5 +77,28 @@ enum LogReaderTests {
         t.equal(LogReader.facts("line 1\n\n\n", tailCount: 3).tail, ["line 1"],
                 "trailing blank lines are dropped")
         t.equal(LogReader.facts("").tail, [], "an empty log yields no lines")
+    }
+
+    /// メニューの幅は一番長い項目で決まる。起動中アプリの一覧のような行を
+    /// 素で出すとメニューが画面いっぱいに広がるので、表示用に丸める。
+    private static func 行の長さ(_ t: inout Harness) {
+        let long = "2026-08-16 18:30:00 [DRY] running apps: "
+            + (1...20).map { "App\($0)" }.joined(separator: ", ")
+        let line = LogReader.facts(long).tail.first ?? ""
+        t.equal(line.count, LogReader.tailLineLimit, "a long line is cut to the limit")
+        t.expect(line.hasSuffix("…"), "a cut line says it was cut", line)
+
+        // 収まる行には触らない（末尾に記号が付くと切れたように読める）
+        let short = "2026-08-16 18:00:00 notice shown"
+        t.equal(LogReader.facts(short).tail, [short], "a short line is left alone")
+
+        // 上限ちょうどの行も切らない
+        let exact = String(repeating: "x", count: LogReader.tailLineLimit)
+        t.equal(LogReader.facts(exact).tail, [exact], "a line exactly at the limit is left alone")
+
+        // 日本語（1文字が複数バイト）でも文字数で数える
+        let japanese = String(repeating: "あ", count: LogReader.tailLineLimit + 10)
+        t.equal(LogReader.facts(japanese).tail.first?.count, LogReader.tailLineLimit,
+                "a multibyte line is counted in characters")
     }
 }

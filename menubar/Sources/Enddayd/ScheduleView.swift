@@ -1,5 +1,36 @@
 import SwiftUI
 
+/// 曜日の入切。
+///
+/// 素の `.toggleStyle(.button)` に任せると、入と切の差がグレーの 216 と 228
+/// （差 4.7%）にしかならず、どの曜日が有効かを一目で読めない。`.tint` を足しても
+/// 変わらなかった。この画面で一番大事な設定なので、フレームワークの選択表現に
+/// 頼らず、地の色・文字色・枠の3つで自分で分ける。
+///
+/// Toggle のまま包んでいるのは、支援技術に「入切できるもの」として伝えるため。
+private struct DayToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            configuration.label
+                .font(.body)
+                .frame(width: 32, height: 24)
+                .foregroundStyle(configuration.isOn ? Color.white : Color.secondary)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(configuration.isOn ? Color.accentColor : Color(nsColor: .controlBackgroundColor))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color(nsColor: .separatorColor),
+                                lineWidth: configuration.isOn ? 0 : 1)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 /// 時刻・曜日・レベルの設定画面。
 /// 保存すると /etc/enddayd.conf を書き換えて reload する（管理者パスワードが要る）。
 struct ScheduleView: View {
@@ -40,10 +71,13 @@ struct ScheduleView: View {
                 HStack(spacing: 6) {
                     ForEach(1...7, id: \.self) { d in
                         Toggle(DaemonModel.weekdayName(d), isOn: dayBinding(d))
-                            .toggleStyle(.button)
+                            .toggleStyle(DayToggleStyle())
+                            .help(days.contains(d) ? "この曜日は有効" : "この曜日は対象外")
                     }
+                    Spacer()
                 }
                 .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             GroupBox("強制終了のレベル") {
@@ -63,15 +97,18 @@ struct ScheduleView: View {
                     }
                 }
                 .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             GroupBox("細かい挙動") {
                 VStack(alignment: .leading, spacing: 8) {
                     Toggle("警告の段階でログアウトを試みる", isOn: $logout)
-                    Toggle("当日スキップ（/etc/enddayd.skip）を許す", isOn: $bypass)
+                    Toggle("当日スキップを許す", isOn: $bypass)
+                        .help("date +%F > /etc/enddayd.skip でその日だけ見送れるようにする")
                     Stepper("最終段階を受け付ける猶予: \(grace) 分", value: $grace, in: 0...120)
                 }
                 .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             if let problem = validationMessage {
@@ -88,17 +125,24 @@ struct ScheduleView: View {
                     .foregroundStyle(.orange)
             }
 
-            HStack {
+            // 説明とボタンを同じ行に並べると、幅が足りず説明が2行に折り返して
+            // ボタンの脇で潰れる。行を分けてボタンだけを右に寄せる。
+            VStack(alignment: .leading, spacing: 10) {
                 Text(model.dryRun
                      ? "いまは停止中です。保存しても電源は落ちません。"
                      : "本番で動いています。保存するとこの内容で終了します。")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                Spacer()
-                Button("閉じる") { dismiss() }
-                Button("保存して反映") { save() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(validationMessage != nil || model.busy)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack(spacing: 8) {
+                    Spacer()
+                    Button("閉じる") { dismiss() }
+                    Button("保存して反映") { save() }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(validationMessage != nil || model.busy)
+                }
             }
         }
         .padding(20)

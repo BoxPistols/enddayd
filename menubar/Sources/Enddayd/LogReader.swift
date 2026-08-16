@@ -24,7 +24,12 @@ enum LogReader {
     static let dryMarker = "[DRY]"
     static let enforceMarker = "enforce reached "
 
-    static func facts(_ text: String, tailCount: Int = 3) -> LogFacts {
+    /// メニューに出す1行の上限。メニューの幅は一番長い項目で決まるので、
+    /// `running apps: iTerm2, Finder, Google Chrome, …` のような行を素で出すと
+    /// メニュー全体が画面いっぱいに広がる。
+    static let tailLineLimit = 64
+
+    static func facts(_ text: String, tailCount: Int = 3, lineLimit: Int = tailLineLimit) -> LogFacts {
         var facts = LogFacts()
         // 区切りは isNewline で見る（CRLF は Swift では 1 文字なので、
         // "\n" や "\r" との比較では取りこぼす）
@@ -33,7 +38,7 @@ enum LogReader {
             .map(String.init)
             .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
 
-        facts.tail = Array(lines.suffix(tailCount))
+        facts.tail = lines.suffix(tailCount).map { truncate($0, to: lineLimit) }
 
         if let line = lines.last(where: { !$0.contains(dryMarker) && $0.contains(enforceMarker) }) {
             facts.lastEnforce = line.replacingOccurrences(of: enforceMarker, with: "")
@@ -46,5 +51,12 @@ enum LogReader {
         }
 
         return facts
+    }
+
+    /// 末尾を省略する。切ったことが分かるように記号を残す
+    /// （黙って切ると、そこで行が終わっているように読めてしまう）。
+    static func truncate(_ line: String, to limit: Int) -> String {
+        guard limit > 1, line.count > limit else { return line }
+        return String(line.prefix(limit - 1)) + "…"
     }
 }
