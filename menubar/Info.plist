@@ -8,6 +8,8 @@
   <string>Enddayd</string>
   <key>CFBundleIdentifier</key>
   <string>io.github.boxpistols.enddayd</string>
+  <key>CFBundleIconFile</key>
+  <string>Enddayd</string>
   <key>CFBundleExecutable</key>
   <string>Enddayd</string>
   <key>CFBundlePackageType</key>

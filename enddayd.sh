@@ -56,6 +56,11 @@ if [ -f "$CONF" ]; then
   # 構文エラーのある conf を素で source すると、代入だけが失敗して
   # 既定値のまま動き続ける（20:00 のつもりが 18:00 になる）。先に弾く。
   if /bin/bash -n "$CONF" 2>/dev/null; then
+    # conf が存在する場合はスケジュールの必須項目を空にしてから読む。
+    # 項目の欠落を既定値で補うと、利用者の意図と違う時刻で動くため。
+    TIMES=""
+    WEEKDAYS=""
+    LEVEL=""
     # shellcheck source=/dev/null
     . "$CONF"
   else
@@ -240,7 +245,7 @@ stage_min() {
   esac
 }
 
-daemon_loaded() { launchctl print "system/${LABEL}" >/dev/null 2>&1; }
+daemon_loaded() { /bin/launchctl print "system/${LABEL}" >/dev/null 2>&1; }
 
 # ---------------------------------------------------------- 本体 run ---
 
@@ -670,8 +675,8 @@ cmd_reload() {
 cmd_uninstall() {
   need_root
   # plist が壊れていたり既に消えていたりしても外せるよう、ラベル指定も試す
-  launchctl bootout system "$PLIST" 2>/dev/null \
-    || launchctl bootout "system/${LABEL}" 2>/dev/null \
+  /bin/launchctl bootout system "$PLIST" 2>/dev/null \
+    || /bin/launchctl bootout "system/${LABEL}" 2>/dev/null \
     || true
   rm -f "$PLIST" "$BIN" "$DRYFLAG" "$BYPASS"
 

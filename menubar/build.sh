@@ -25,6 +25,10 @@ lipo -create -output "$APP/Contents/MacOS/Enddayd" build/Enddayd-arm64 build/End
 
 cp Info.plist "$APP/Contents/Info.plist"
 
+# アイコン。各サイズを実寸で描き直す
+./icon/build-icns.sh "$PWD/build/Enddayd.icns" >/dev/null
+cp build/Enddayd.icns "$APP/Contents/Resources/Enddayd.icns"
+
 # デーモン本体を同梱する。アプリの「導入する」はこれを install する
 cp ../enddayd.sh "$APP/Contents/Resources/enddayd.sh"
 chmod 755 "$APP/Contents/Resources/enddayd.sh"

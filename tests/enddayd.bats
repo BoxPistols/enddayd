@@ -249,6 +249,19 @@ setup() {
   [[ "$output" == *"KILL_GRACE"* ]]
 }
 
+# スケジュールの必須項目が欠けた conf は既定値で補わず拒否する
+@test "conf: rejects a config with a missing required key" {
+  write_conf_raw <<'EOF'
+TIMES="18:00,18:30,18:45,18:50"
+WEEKDAYS="1,2,3,4,5,6,7"
+KILL_GRACE="10"
+EOF
+  run run_at 1130
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"LEVEL"* ]]
+  [[ "$output" != *"stage="* ]]
+}
+
 # 時刻が早い順でなければ拒否する（段階が入れ替わったまま走らない）
 @test "conf: rejects TIMES that are not in ascending order" {
   write_conf_file 'TIMES="18:50,18:30,18:45,18:00"' 'WEEKDAYS="1,2,3,4,5,6,7"' \

@@ -90,16 +90,28 @@ final class DaemonModel: ObservableObject {
         }
 
         var broken = false
+        for key in ["TIMES", "WEEKDAYS", "LEVEL"] {
+            if dict[key] == nil {
+                broken = true
+            }
+        }
 
         if let t = dict["TIMES"] {
             let parts = t.split(separator: ",").map(String.init)
-            if parts.count == 4, parts.allSatisfy(Self.isValidTime) {
+            let minutes = parts.compactMap { time -> Int? in
+                guard let (hour, minute) = Self.parseTime(time) else { return nil }
+                return hour * 60 + minute
+            }
+            let ascending = zip(minutes, minutes.dropFirst()).allSatisfy { $0 < $1 }
+            if parts.count == 4, minutes.count == 4, ascending {
                 times = parts
             } else { broken = true }
         }
         if let w = dict["WEEKDAYS"] {
-            let parts = w.split(separator: ",").compactMap { Int($0) }
-            if !parts.isEmpty, parts.allSatisfy({ (1...7).contains($0) }) {
+            let rawParts = w.split(separator: ",").map(String.init)
+            let parts = rawParts.compactMap { Int($0) }
+            if !rawParts.isEmpty, rawParts.count == parts.count,
+               parts.allSatisfy({ (1...7).contains($0) }) {
                 weekdays = Set(parts)
             } else { broken = true }
         }
@@ -109,8 +121,20 @@ final class DaemonModel: ObservableObject {
         if let g = dict["KILL_GRACE"] {
             if let n = Int(g), n >= 0 { killGrace = n } else { broken = true }
         }
-        logoutAttempt = dict["LOGOUT_ATTEMPT"] != "0"
-        allowBypass = dict["ALLOW_BYPASS"] != "0"
+        if let value = dict["LOGOUT_ATTEMPT"] {
+            if value == "0" || value == "1" {
+                logoutAttempt = value == "1"
+            } else {
+                broken = true
+            }
+        }
+        if let value = dict["ALLOW_BYPASS"] {
+            if value == "0" || value == "1" {
+                allowBypass = value == "1"
+            } else {
+                broken = true
+            }
+        }
         confBroken = broken
     }
 

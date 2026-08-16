@@ -24,6 +24,7 @@ EOF
 #!/bin/bash
 # asuser <uid> <cmd...> のみ通す
 if [ "${1:-}" = "asuser" ]; then shift 2; exec "$@"; fi
+if [ "${1:-}" = "print" ]; then exit 1; fi
 exit 0
 EOF
   cat >"$SANDBOX/bin/sudo" <<'EOF'

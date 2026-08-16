@@ -1,7 +1,24 @@
 import SwiftUI
+import AppKit
+
+/// 二重起動を防ぐ。ビルドした場所と /Applications の両方を開くと
+/// メニューバーにアイコンが2つ並び、どちらを操作しているか分からなくなる。
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let me = ProcessInfo.processInfo.processIdentifier
+        let others = NSRunningApplication
+            .runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+            .filter { $0.processIdentifier != me }
+        if let first = others.first {
+            first.activate()
+            NSApp.terminate(nil)
+        }
+    }
+}
 
 @main
 struct EnddaydApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = DaemonModel()
 
     var body: some Scene {
