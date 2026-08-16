@@ -14,6 +14,12 @@ MIN=14.0
 rm -rf build dist
 mkdir -p build "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
+# Swift 6 言語モードでも通ることを確かめる。並行性の指摘は現在の既定だと
+# 警告どまりで、ビルドは成功してしまう。6 に切り替わってから直すことになると
+# 「ビルドできない」状態から始まるので、通るうちに落としておく。
+swiftc -parse-as-library -swift-version 6 -typecheck \
+  -target "arm64-apple-macos${MIN}" Sources/Enddayd/*.swift
+
 # arm64 と x86_64 の両方を作って束ねる（配布先の CPU を選ばない）
 for arch in arm64 x86_64; do
   swiftc -parse-as-library -O \

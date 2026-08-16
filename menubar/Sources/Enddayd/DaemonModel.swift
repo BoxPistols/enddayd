@@ -2,46 +2,50 @@ import Foundation
 import Combine
 import ServiceManagement
 
-/// enddayd の強制終了レベル
-enum EnforceLevel: String, CaseIterable, Identifiable {
-    case notify, soft, normal, hard
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .notify: return "notify — 通知のみ。電源は落とさない"
-        case .soft:   return "soft — アプリに終了を依頼。未保存があれば止まる"
-        case .normal: return "normal — root から shutdown。アプリの拒否権なし"
-        case .hard:   return "hard — セッションを畳んでから shutdown"
-        }
-    }
-}
-
 /// デーモン側の状態。真実はすべてファイルにあり、このクラスは読むだけ。
 /// 変更はすべて管理者権限のシェル経由で行い、終わったら読み直す。
 @MainActor
 final class DaemonModel: ObservableObject {
 
-    // デーモンと共有しているパス（enddayd.sh と一致させる）
-    static let binPath   = "/usr/local/bin/enddayd.sh"
-    static let plistPath = "/Library/LaunchDaemons/local.enddayd.plist"
-    static let confPath  = "/etc/enddayd.conf"
-    static let dryPath   = "/etc/enddayd.dryrun"
-    static let skipPath  = "/etc/enddayd.skip"
-    static let logPath   = "/var/log/enddayd.log"
+    // デーモンと共有しているパス（enddayd.sh と一致させる）。
+    // 背景キューからも読むので主アクターに縛らない（縛ると Swift 6 で
+    // コンパイルが通らなくなる）。
+    nonisolated static let label     = "local.enddayd"
+    nonisolated static let binPath   = "/usr/local/bin/enddayd.sh"
+    nonisolated static let plistPath = "/Library/LaunchDaemons/local.enddayd.plist"
+    nonisolated static let confPath  = "/etc/enddayd.conf"
+    nonisolated static let dryPath   = "/etc/enddayd.dryrun"
+    nonisolated static let skipPath  = "/etc/enddayd.skip"
+    nonisolated static let logPath   = "/var/log/enddayd.log"
 
     // --- 読み取った状態 ---
     @Published var installed = false
     @Published var dryRun = true
     @Published var skipToday = false
-    @Published var times: [String] = ["18:00", "18:30", "18:45", "18:50"]
-    @Published var weekdays: Set<Int> = [1, 2, 3, 4, 5]   // 1=月 … 7=日
-    @Published var level: EnforceLevel = .normal
-    @Published var logoutAttempt = true
-    @Published var allowBypass = true
-    @Published var killGrace = 10
-    @Published var confBroken = false
-    @Published var logTail: [String] = []
+    @Published private(set) var conf = ConfState()
+    @Published private(set) var confWarnings: [String] = []
+    @Published private(set) var logFacts = LogFacts()
+
+    /// launchd に実際に登録されているか。ファイルの有無とは別で、
+    /// plist が残ったまま外れている状態を見分けるために要る。
+    @Published private(set) var daemonLoaded = false
+
+    /// 同梱の本体と導入済みの本体が違う。更新の導線を出す合図。
+    @Published private(set) var updateAvailable = false
+
+    // 設定は ConfState 1 つにまとめ、参照側はここを通す
+    var times: [String] { conf.times }
+    var weekdays: Set<Int> { conf.weekdays }
+    var level: EnforceLevel { conf.level }
+    var logoutAttempt: Bool { conf.logoutAttempt }
+    var allowBypass: Bool { conf.allowBypass }
+    var killGrace: Int { conf.killGrace }
+    var confBroken: Bool { conf.isBroken }
+    var confProblems: [String] { conf.problems }
+
+    var logTail: [String] { logFacts.tail }
+    var lastEnforce: String? { logFacts.lastEnforce }
+    var automation: AutomationStatus { logFacts.automation }
 
     // --- 操作の進行状態 ---
     @Published var busy = false
@@ -71,85 +75,53 @@ final class DaemonModel: ObservableObject {
         }
 
         readConf()
-        readLogTail()
+        readLog()
+        refreshProbes()
     }
 
     private func readConf() {
         guard let text = try? String(contentsOfFile: Self.confPath, encoding: .utf8) else {
-            confBroken = false   // 未導入なら既定値のまま
+            conf = ConfState()          // 未導入なら既定値のまま
+            confWarnings = []
             return
         }
-        var dict: [String: String] = [:]
-        for line in text.split(separator: "\n") {
-            let s = line.trimmingCharacters(in: .whitespaces)
-            guard !s.hasPrefix("#"), let eq = s.firstIndex(of: "=") else { continue }
-            let key = String(s[..<eq])
-            var val = String(s[s.index(after: eq)...])
-            val = val.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-            dict[key] = val
-        }
-
-        var broken = false
-        for key in ["TIMES", "WEEKDAYS", "LEVEL"] {
-            if dict[key] == nil {
-                broken = true
-            }
-        }
-
-        if let t = dict["TIMES"] {
-            let parts = t.split(separator: ",").map(String.init)
-            let minutes = parts.compactMap { time -> Int? in
-                guard let (hour, minute) = Self.parseTime(time) else { return nil }
-                return hour * 60 + minute
-            }
-            let ascending = zip(minutes, minutes.dropFirst()).allSatisfy { $0 < $1 }
-            if parts.count == 4, minutes.count == 4, ascending {
-                times = parts
-            } else { broken = true }
-        }
-        if let w = dict["WEEKDAYS"] {
-            let rawParts = w.split(separator: ",").map(String.init)
-            let parts = rawParts.compactMap { Int($0) }
-            if !rawParts.isEmpty, rawParts.count == parts.count,
-               parts.allSatisfy({ (1...7).contains($0) }) {
-                weekdays = Set(parts)
-            } else { broken = true }
-        }
-        if let l = dict["LEVEL"] {
-            if let lv = EnforceLevel(rawValue: l) { level = lv } else { broken = true }
-        }
-        if let g = dict["KILL_GRACE"] {
-            if let n = Int(g), n >= 0 { killGrace = n } else { broken = true }
-        }
-        if let value = dict["LOGOUT_ATTEMPT"] {
-            if value == "0" || value == "1" {
-                logoutAttempt = value == "1"
-            } else {
-                broken = true
-            }
-        }
-        if let value = dict["ALLOW_BYPASS"] {
-            if value == "0" || value == "1" {
-                allowBypass = value == "1"
-            } else {
-                broken = true
-            }
-        }
-        confBroken = broken
+        conf = ConfParser.parse(text)
+        confWarnings = ConfParser.warnings(for: conf)
     }
 
-    private func readLogTail() {
+    private func readLog() {
         guard let text = try? String(contentsOfFile: Self.logPath, encoding: .utf8) else {
-            logTail = []
+            logFacts = LogFacts()
             return
         }
-        logTail = text.split(separator: "\n").suffix(3).map(String.init)
+        logFacts = LogReader.facts(text)
+    }
+
+    /// 外部プロセスとファイル比較は背景でやる。30秒ごとに主スレッドを
+    /// 止めると、メニューを開いた瞬間に固まって見える。
+    private func refreshProbes() {
+        let bundled = Self.bundledScriptPath
+        Task.detached(priority: .utility) {
+            let loaded = DaemonProbe.daemonLoaded(label: DaemonModel.label)
+            let differs = DaemonProbe.installedDiffers(bundled: bundled,
+                                                       installed: DaemonModel.binPath)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.daemonLoaded = loaded
+                self.updateAvailable = differs
+            }
+        }
+    }
+
+    nonisolated static var bundledScriptPath: String? {
+        Bundle.main.path(forResource: "enddayd", ofType: "sh")
     }
 
     // ------------------------------------------------------ メニューバー表示 ---
 
     var symbolName: String {
         if !installed { return "sunset" }
+        if confBroken || !daemonLoaded { return "exclamationmark.triangle" }
         if dryRun { return "pause.circle" }
         return "sunset.fill"
     }
@@ -157,6 +129,9 @@ final class DaemonModel: ObservableObject {
     var barText: String {
         guard installed else { return "" }
         if confBroken { return "設定エラー" }
+        // 本体と plist はあるのに launchd から外れている。放っておくと
+        // 「入れたのに何も起きない」になるので、停止中と区別して出す。
+        if !daemonLoaded { return "未常駐" }
         if dryRun { return "停止中" }
         if skipToday && isScheduledToday { return "今日は休み" }
         guard let next = nextEnforceDate() else { return "" }
@@ -231,8 +206,10 @@ final class DaemonModel: ObservableObject {
         adminAction("/bin/rm -f \(Self.dryPath)")
     }
 
+    /// 導入と更新は同じ経路。`install` は導入済みならモードを保つので、
+    /// 本番で動いているものを更新しても勝手に停止しない（enddayd.sh 側の約束）。
     func install() {
-        guard let script = Bundle.main.path(forResource: "enddayd", ofType: "sh") else {
+        guard let script = Self.bundledScriptPath else {
             lastError = "アプリに enddayd.sh が同梱されていません"
             return
         }
@@ -242,7 +219,7 @@ final class DaemonModel: ObservableObject {
     func uninstall() {
         let script = FileManager.default.fileExists(atPath: Self.binPath)
             ? Self.binPath
-            : (Bundle.main.path(forResource: "enddayd", ofType: "sh") ?? Self.binPath)
+            : (Self.bundledScriptPath ?? Self.binPath)
         adminAction("/bin/bash \(Admin.shQuote(script)) uninstall")
     }
 
@@ -300,12 +277,11 @@ final class DaemonModel: ObservableObject {
         parseTime(s) != nil
     }
 
+    /// 時刻の妥当性は ConfParser に一本化する。ここに別の規則を書くと、
+    /// 表示は通るのに保存すると弾かれる（またはその逆）という食い違いが出る。
     static func parseTime(_ s: String) -> (Int, Int)? {
-        let parts = s.split(separator: ":")
-        guard parts.count == 2,
-              let h = Int(parts[0]), let m = Int(parts[1]),
-              (0...23).contains(h), (0...59).contains(m) else { return nil }
-        return (h, m)
+        guard let total = ConfParser.minutes(of: s) else { return nil }
+        return (total / 60, total % 60)
     }
 
     /// 1=月 … 7=日（enddayd.sh の date +%u と同じ）

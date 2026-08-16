@@ -48,3 +48,10 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: run tests
         run: ./tests/run.sh
+
+      # メニューバーアプリ。設定の解釈がデーモンと食い違うと
+      # 「画面では正常なのに走らない」になるので、そこを守る。
+      - name: menubar tests
+        run: ./menubar/tests/run.sh
+      - name: menubar build
+        run: ./menubar/build.sh

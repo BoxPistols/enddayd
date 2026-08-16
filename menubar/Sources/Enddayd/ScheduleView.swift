@@ -80,6 +80,14 @@ struct ScheduleView: View {
                     .foregroundStyle(.red)
             }
 
+            // 保存はできるが、書いたとおりには効かないもの。
+            // 判定はデーモンと共通の ConfParser に置いてある。
+            ForEach(warningMessages, id: \.self) { warning in
+                Text("注意: \(warning)")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+            }
+
             HStack {
                 Text(model.dryRun
                      ? "いまは停止中です。保存しても電源は落ちません。"
@@ -96,6 +104,9 @@ struct ScheduleView: View {
         .padding(20)
         .frame(width: 460)
         .onAppear { loadFromModel() }
+        // 閉じたら読み込み済みの印を外す。外さないと、閉じているあいだに
+        // 設定が変わっても次に開いたとき古い値のままになる。
+        .onDisappear { loaded = false }
     }
 
     // ------------------------------------------------------------ 入出力 ---
@@ -141,6 +152,20 @@ struct ScheduleView: View {
             return "時刻は早い順に並べてください（\(stageLabels[i]) が前の段階より早いか同時刻です）"
         }
         return nil
+    }
+
+    /// 保存を止めない注意書き。止めてしまうと、その日から強制終了ごと
+    /// 効かなくなるほうが害が大きい。
+    private var warningMessages: [String] {
+        guard validationMessage == nil, stageDates.count == 4 else { return [] }
+        var provisional = ConfState()
+        provisional.times = timeStrings
+        provisional.weekdays = days
+        provisional.level = level
+        provisional.logoutAttempt = logout
+        provisional.allowBypass = bypass
+        provisional.killGrace = grace
+        return ConfParser.warnings(for: provisional)
     }
 
     private func save() {

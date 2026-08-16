@@ -28,16 +28,36 @@ struct MenuContent: View {
             Text("未導入（常駐していません）")
         } else if model.confBroken {
             Text("設定が壊れています。直すまで終業は実行されません")
+            // 「壊れています」だけだと直しようがない。デーモンが拒否している
+            // 理由をそのまま出す（判定の規則はデーモン側と揃えてある）。
+            ForEach(model.confProblems.prefix(3), id: \.self) { problem in
+                Text("・\(problem)")
+            }
         } else {
             let days = model.weekdays.sorted().map(DaemonModel.weekdayName).joined()
             Text("\(days) \(model.times[0]) 予告 → \(model.times[3]) 終了（\(model.level.rawValue)）")
-            if model.dryRun {
+            if !model.daemonLoaded {
+                Text("常駐していません。「本体を入れ直す」で復帰します")
+            } else if model.dryRun {
                 Text("いまは停止中（通知のみ・電源は落ちません）")
             } else if let next = model.nextEnforceDate() {
                 Text("次の強制終了: \(Self.relative(next))")
             }
             if model.skipToday {
                 Text("今日はスキップ指定があります")
+            }
+            ForEach(model.confWarnings, id: \.self) { warning in
+                Text("注意: \(warning)")
+            }
+            // 効いているかどうかの手がかり。本番で一度も落ちていなければ
+            // 経路が生きているかは分からない（enddayd.sh の status と同じ）。
+            if let reached = model.lastEnforce {
+                Text("最後に本番で実行: \(reached)")
+            } else if !model.dryRun {
+                Text("本番ではまだ一度も実行されていません")
+            }
+            if model.logoutAttempt && model.automation == .denied {
+                Text("「自動化」の許可がありません。警告時のログアウトは失敗します")
             }
         }
         if let err = model.lastError {
@@ -90,6 +110,11 @@ struct MenuContent: View {
         if !model.installed {
             Button("導入する…") { model.install() }
                 .disabled(model.busy)
+        } else if model.updateAvailable || !model.daemonLoaded {
+            // アプリを新しくしても、導入済みの本体は勝手には入れ替わらない。
+            // 出口が無いと古いまま動き続けるので、違いが出たら導線を出す。
+            Button("本体を入れ直す…") { confirmReinstall() }
+                .disabled(model.busy)
         }
 
         Toggle("ログイン時に起動", isOn: Binding(
@@ -125,6 +150,23 @@ struct MenuContent: View {
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn {
             model.resume()
+        }
+    }
+
+    private func confirmReinstall() {
+        let alert = NSAlert()
+        alert.messageText = "本体を入れ直しますか？"
+        let reason = model.daemonLoaded
+            ? "このアプリが持っている本体と、導入済みの本体が違います。"
+            : "本体はありますが、常駐から外れています。"
+        alert.informativeText = reason
+            + "入れ直しても、いまのモード（\(model.dryRun ? "停止中" : "本番")）と設定はそのままです。"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "入れ直す")
+        alert.addButton(withTitle: "やめておく")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            model.install()
         }
     }
 
