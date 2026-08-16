@@ -29,12 +29,23 @@ sudo touch /etc/enddayd.dryrun
 
 ### 0. 準備
 
-いま本番かドライランかを確かめ、ログを空にしておく（この確認のログだけを見たいので）。
+いま本番かドライランかを確かめ、ログを退避しておく（この確認のログだけを見たいので）。
 
 ```bash
 sudo /usr/local/bin/enddayd.sh status
 sudo cp /var/log/enddayd.log /var/log/enddayd.log.before-verify
 ```
+
+ついでに、置いたローテーション設定が `newsyslog` に受理されるかを見る。**`-n` は
+ドライランなので何も回さないが、root でないと実行できない**ため、テストからは確認できない。
+
+```bash
+sudo newsyslog -n -v -f /etc/newsyslog.d/enddayd.conf
+```
+
+`/var/log/enddayd.log` と `/var/log/enddayd.err.log` の 2 行が出て、それぞれ
+「does not need trimming」等の判定が付けば読めている。`malformed line` のような
+指摘が出たら書式が違うので `write_newsyslog` を直す。
 
 ### 1. 自動化の許可
 

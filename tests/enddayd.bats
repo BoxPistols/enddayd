@@ -546,6 +546,22 @@ EOF
   contains "$(cat "$SANDBOX/etc/newsyslog.d/enddayd.conf")" "enddayd.err.log"
 }
 
+# newsyslog(8) が読める形であること。ここが崩れると、置けてはいるのに
+# 回らない（しかも newsyslog は黙っていることが多い）。
+# 書式: logfilename [owner:group] mode count size when flags
+# 実際に読ませる確認は root が要るので docs/verify-on-device.md に置いた。
+@test "newsyslog: the generated lines have the documented field layout" {
+  as_root_installable bash "$SCRIPT" install
+  local body
+  body=$(grep -v '^#' "$SANDBOX/etc/newsyslog.d/enddayd.conf")
+  [ "$(echo "$body" | wc -l | tr -d ' ')" = "2" ]
+  # 各行は パス + 5項目（mode count size when flags）
+  echo "$body" | while read -r line; do
+    [ "$(echo "$line" | wc -w | tr -d ' ')" = "6" ] || exit 1
+  done
+  contains "$body" "644  5     100  *     J"
+}
+
 # 削除時に消す。残すと存在しないログを回そうとする設定が居座る
 @test "newsyslog: uninstall removes the rotation config" {
   as_root_installable bash "$SCRIPT" install

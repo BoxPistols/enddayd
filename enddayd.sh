@@ -537,12 +537,16 @@ write_newsyslog() {
   [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || { echo "$dir を作成できませんでした（ログは伸び続けます）" >&2; return 1; }
 
   tmp="${NEWSYSLOG}.new.$$"
-  # logfilename [owner:group] mode count size when flags
-  #   size は KB。100KB を超えたら回し、5世代を bzip2 で残す
+  # 書式は macOS 標準の drop-in（/etc/newsyslog.d/wifi.conf 等）に合わせる。
+  # owner:group は省略できるので書かない。newsyslog は root で走り、ログも
+  # root のものなので効果は変わらず、項目が少ないほど解釈を誤られにくい。
+  #   size は KB。100KB を超えたら回し、5世代を bzip2（J）で残す。
+  #   when が * なので大きさだけで判断する（時刻では回さない）。
   {
     echo "# enddayd が置いたもの。uninstall で消える。"
-    printf '%-28s %-12s %s\n' "$LOG"    "root:wheel" "644  5     100  *     J"
-    printf '%-28s %-12s %s\n' "$ERRLOG" "root:wheel" "644  5     100  *     J"
+    echo "# logfilename          [owner:group]    mode count size when  flags"
+    printf '%-38s %s\n' "$LOG"    "644  5     100  *     J"
+    printf '%-38s %s\n' "$ERRLOG" "644  5     100  *     J"
   } >"$tmp" 2>/dev/null || { rm -f "$tmp"; echo "$NEWSYSLOG を書けませんでした（ログは伸び続けます）" >&2; return 1; }
 
   if ! mv "$tmp" "$NEWSYSLOG"; then
