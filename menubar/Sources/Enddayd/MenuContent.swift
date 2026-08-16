@@ -133,6 +133,10 @@ struct MenuContent: View {
             }
         }
 
+        // 版を出しておく。出ていないと「入れ直したのに古いままでは」を
+        // 確かめる手段が無く、動作の報告と実際の版が結び付かない。
+        Text("バージョン \(Self.appVersion)")
+
         Divider()
         Button("終了") { NSApplication.shared.terminate(nil) }
     }
@@ -180,6 +184,16 @@ struct MenuContent: View {
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn {
             model.uninstall()
+        }
+    }
+
+    private static var appVersion: String {
+        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        switch (short, build) {
+        case let (short?, build?): return "\(short) (\(build))"
+        case let (short?, nil):    return short
+        default:                   return "不明"
         }
     }
 
