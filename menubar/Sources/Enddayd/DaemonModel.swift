@@ -194,7 +194,16 @@ final class DaemonModel: ObservableObject {
         if !installed { return "power.dotted" }
         if confBroken || !daemonLoaded { return "exclamationmark.triangle" }
         if dryRun { return "pause.circle" }
+        // タイマーの残りを出しているときは記号で見分ける。文字で「タイマー」と
+        // 書くとメニューバーの幅を食う。
+        if timerDueSoon != nil { return "timer" }
         return "power"
+    }
+
+    /// 1時間以内に来るタイマーの締切。メニューバーに残りを出す対象。
+    var timerDueSoon: Date? {
+        guard let deadline = timerDeadline, deadline.timeIntervalSinceNow < 60 * 60 else { return nil }
+        return deadline
     }
 
     var barText: String {
@@ -204,15 +213,16 @@ final class DaemonModel: ObservableObject {
         // 「入れたのに何も起きない」になるので、停止中と区別して出す。
         if !daemonLoaded { return "未常駐" }
         if dryRun { return "停止中" }
-        // タイマーは自分で押したものなので、スキップ中でも出す
-        if let deadline = timerDeadline, deadline.timeIntervalSinceNow < 60 * 60 {
-            return "タイマー あと\(max(Int(deadline.timeIntervalSinceNow / 60), 0))分"
+        // タイマーは自分で押したものなので、スキップ中でも出す。
+        // メニューバーは幅が限られるので、残り時間は「残12分」と最短で書く。
+        if let deadline = timerDueSoon {
+            return "残\(max(Int(deadline.timeIntervalSinceNow / 60), 0))分"
         }
         if skipToday && isScheduledToday { return "今日は休み" }
         guard let next = nextEnforceDate() else { return "" }
         let minutes = Int(next.timeIntervalSinceNow / 60)
         if Calendar.current.isDateInToday(next) && minutes < 60 {
-            return "あと\(max(minutes, 0))分"
+            return "残\(max(minutes, 0))分"
         }
         return Self.timeFormatter.string(from: next)
     }
