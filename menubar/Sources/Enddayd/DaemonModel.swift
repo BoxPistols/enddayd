@@ -188,11 +188,13 @@ final class DaemonModel: ObservableObject {
 
     // ------------------------------------------------------ メニューバー表示 ---
 
+    /// 電源記号を使う。以前の日没（sunset）は天気アプリのアイコンと並ぶと
+    /// 見分けがつかず、時計の横で「日の入り時刻」に読めてしまった。
     var symbolName: String {
-        if !installed { return "sunset" }
+        if !installed { return "power.dotted" }
         if confBroken || !daemonLoaded { return "exclamationmark.triangle" }
         if dryRun { return "pause.circle" }
-        return "sunset.fill"
+        return "power"
     }
 
     var barText: String {
