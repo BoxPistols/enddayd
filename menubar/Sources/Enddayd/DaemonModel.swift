@@ -206,19 +206,20 @@ final class DaemonModel: ObservableObject {
         return deadline
     }
 
+    /// メニューバーの文字。幅が限られるので、記号で伝わることは文字にしない。
     var barText: String {
         guard installed else { return "" }
-        if confBroken { return "設定エラー" }
+        if confBroken { return "設定" }       // ⚠ と並ぶので「エラー」は記号が言う
         // 本体と plist はあるのに launchd から外れている。放っておくと
         // 「入れたのに何も起きない」になるので、停止中と区別して出す。
         if !daemonLoaded { return "未常駐" }
-        if dryRun { return "停止中" }
+        if dryRun { return "停止" }          // ⏸ と並ぶので「中」は要らない
         // タイマーは自分で押したものなので、スキップ中でも出す。
         // メニューバーは幅が限られるので、残り時間は「残12分」と最短で書く。
         if let deadline = timerDueSoon {
             return "残\(max(Int(deadline.timeIntervalSinceNow / 60), 0))分"
         }
-        if skipToday && isScheduledToday { return "今日は休み" }
+        if skipToday && isScheduledToday { return "休み" }   // 「今日」は自明
         guard let next = nextEnforceDate() else { return "" }
         let minutes = Int(next.timeIntervalSinceNow / 60)
         if Calendar.current.isDateInToday(next) && minutes < 60 {
