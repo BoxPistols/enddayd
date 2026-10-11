@@ -782,6 +782,17 @@ kv_set() {
 # エポック秒を HH:MM に。BSD（macOS）は -r、GNU は -d @ と書き方が違う。
 epoch_hhmm() { date -r "$1" +%H:%M 2>/dev/null || date -d "@$1" +%H:%M; }
 
+# 最後のキーボード・マウス操作からの秒数。取れなければ空。
+# /dev/console の持ち主は画面ロック中もディスプレイのスリープ中もログイン中の
+# ユーザーのままなので、「いる」だけでは「いま作業している」と言えない。
+hid_idle_sec() {
+  /usr/sbin/ioreg -c IOHIDSystem 2>/dev/null \
+    | awk '/HIDIdleTime/ { print int($NF / 1000000000); exit }'
+}
+
+# 作業開始とみなす操作の新しさ（秒）
+WORK_START_IDLE_MAX=120
+
 # 締切までの残り秒数から段階を決める。まだ早ければ空、猶予も過ぎていれば missed。
 countdown_stage() {
   local rem="$1"
@@ -850,7 +861,7 @@ tick_timer() {
   perform_stage "$stage" "$kill_at" "$title"
 }
 
-# 「作業開始から N 時間」。開始は、設定した曜日にその日初めて GUI ユーザーを
+# 「作業開始から N 時間」。開始は、設定した曜日にその日初めて GUI ユーザーの操作を
 # 見た時刻。日付印つきで残すので、再起動しても開始は巻き戻らない
 # （巻き戻るなら、再起動するだけで延ばせてしまう）。
 tick_work_limit() {
@@ -871,6 +882,15 @@ tick_work_limit() {
   start=$(kv_get "$WORKSTART_FILE" START)
   case "$start" in ''|*[!0-9]*) stamp="" ;; esac
   if [ "$stamp" != "$today" ]; then
+    # ログインしたまま夜を越した Mac では、日付が変わった直後に開始が付いて
+    # しまう。直近に操作があったときだけ開始にする。取れなければ従来どおり
+    # 記録する（取れないことで上限ごと黙って効かなくなるほうが悪い）。
+    local idle
+    idle=$(hid_idle_sec)
+    case "$idle" in
+      ''|*[!0-9]*) ;;
+      *) [ "$idle" -gt "$WORK_START_IDLE_MAX" ] && return 0 ;;
+    esac
     start="$now"
     {
       echo "# enddayd が置いた作業開始の記録。日付が変われば取り直す。"
@@ -922,6 +942,11 @@ gen_plist() {
       for slot in $EXTEND_SLOTS; do
         at=$((SES_3[i] + slot))
         [ "$at" -gt $((24 * 60 - 1)) ] && continue   # 日をまたぐぶんは置かない
+        # 次の回の予告に食い込む延長は read_today が断る。受け皿だけ置くと、
+        # 延長していない日にその時刻が次の回の段階として走り、予告や警告が二重に出る。
+        if [ $((i + 1)) -lt "$SES_N" ] && [ $((at + KILL_GRACE)) -ge "${SES_0[$((i + 1))]}" ]; then
+          continue
+        fi
         entries+="    <dict><key>Weekday</key><integer>${d}</integer>"
         entries+="<key>Hour</key><integer>$((at / 60))</integer>"
         entries+="<key>Minute</key><integer>$((at % 60))</integer></dict>"$'\n'
@@ -996,7 +1021,7 @@ ALLOW_BYPASS="$ALLOW_BYPASS"
 KILL_GRACE="$KILL_GRACE"
 # 追加の強制終了（例: "12:00,15:00"）。予告などは TIMES と同じ間隔で前に付く
 EXTRA_ENFORCE="$EXTRA_ENFORCE"
-# 作業開始からの上限（例: "8" や "7:30"）。開始はその日最初にログインを見た時刻
+# 作業開始からの上限（例: "8" や "7:30"）。開始はその日最初に操作を見た時刻
 WORK_LIMIT="$WORK_LIMIT"
 EOF
   chmod 644 "$CONF"; chown root:wheel "$CONF"
@@ -1245,7 +1270,7 @@ cmd_setup() {
   echo
 
   # --- 作業開始からの上限 ---
-  echo "【作業時間の上限】その日最初のログインから数えて、この長さで終了します（例: 8 / 7:30）"
+  echo "【作業時間の上限】その日最初に操作したときから数えて、この長さで終了します（例: 8 / 7:30）"
   echo "  時刻指定とは別に効きます。無しにするなら -"
   while :; do
     ask "  上限" "${WORK_LIMIT:--}"
@@ -1621,7 +1646,7 @@ cmd_config_body() {
     echo "強制終了の回: $(enforce_list)  （どの回も ${lead}）"
   fi
   if [ -n "$WORK_LIMIT" ]; then
-    echo "作業時間上限: $(work_limit_label)  （その日最初のログインから）"
+    echo "作業時間上限: $(work_limit_label)  （その日最初の操作から）"
   fi
   echo "レベル      : $(level_label "$LEVEL")"
   echo "当日スキップ: $([ "$ALLOW_BYPASS" = 1 ] && echo 許可 || echo 不可)"

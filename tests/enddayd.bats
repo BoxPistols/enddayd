@@ -923,6 +923,17 @@ conf_with_extra() {
   contains "$output" "<key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer>"
 }
 
+# 次の回の予告に食い込む受け皿は置かない。置くと延長の無い日に、
+# その時刻が次の回の段階として走り、予告や警告が二重に出る
+@test "plist: drops catch triggers that run into the next session" {
+  write_conf_file 'TIMES="13:00,13:30,13:45,13:50"' 'WEEKDAYS="1"' \
+                  'LEVEL="normal"' 'KILL_GRACE="10"' 'EXTRA_ENFORCE="12:00"'
+  run bash "$SCRIPT" plist
+  count=$(echo "$output" | grep -c "<key>Weekday</key>")
+  [ "$count" -eq 13 ]   # 12:00 回は 4 + 受け皿 12:30 のみ、13:50 回は 4 + 4
+  not_contains "$output" "<key>Hour</key><integer>14</integer><key>Minute</key><integer>0</integer>"
+}
+
 # 書式の誤りは断る
 @test "conf: rejects a malformed EXTRA_ENFORCE" {
   conf_with_extra "12:00,3pm"
@@ -1208,6 +1219,25 @@ conf_with_work_limit() {
 }
 
 # 開始は巻き戻らない（再起動で延ばせない）
+# 画面ロックのまま夜を越した Mac で、日付が変わった直後を開始にしない
+@test "work: no recent input does not start the work day" {
+  conf_with_work_limit "8"
+  ENDDAYD_TEST_IDLE_NS=3600000000000 run tick_dry
+  not_contains "$output" "work start"
+  [ ! -f "$SANDBOX/etc/workstart" ]
+  # 操作が戻ったところで開始になる
+  ENDDAYD_TEST_IDLE_NS=3000000000 run tick_dry
+  contains "$output" "work start"
+}
+
+# 操作の時間が取れなければ従来どおり記録する（上限ごと黙って効かなくならない）
+@test "work: an unreadable idle time still records the start" {
+  conf_with_work_limit "8"
+  printf '#!/bin/bash\nexit 1\n' >"$SANDBOX/bin/ioreg"
+  run tick_dry
+  contains "$output" "work start"
+}
+
 @test "work: a later tick keeps the recorded start" {
   conf_with_work_limit "8"
   write_workstart_ago 3600

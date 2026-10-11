@@ -64,6 +64,12 @@ case "$*" in
 esac
 exit 0
 EOF
+  # 最後の操作からの時間。既定は 5 秒前（いま操作している）。
+  # ENDDAYD_TEST_IDLE_NS で差し替える（ナノ秒）。
+  cat >"$SANDBOX/bin/ioreg" <<'EOF'
+#!/bin/bash
+echo "    | |   \"HIDIdleTime\" = ${ENDDAYD_TEST_IDLE_NS:-5000000000}"
+EOF
   cat >"$SANDBOX/bin/afplay" <<'EOF'
 #!/bin/bash
 exit 0
@@ -86,6 +92,7 @@ EOF
     -e "s#/usr/bin/sudo#$SANDBOX/bin/sudo#g" \
     -e "s#/usr/bin/osascript#$SANDBOX/bin/osascript#g" \
     -e "s#/usr/bin/afplay#$SANDBOX/bin/afplay#g" \
+    -e "s#/usr/sbin/ioreg#$SANDBOX/bin/ioreg#g" \
     -e "s#/sbin/shutdown#$SANDBOX/bin/shutdown#g" \
     -e "s#^BIN=.*#BIN=$SANDBOX/installed/enddayd.sh#" \
     -e "s#^PLIST=.*#PLIST=$SANDBOX/installed/local.enddayd.plist#" \

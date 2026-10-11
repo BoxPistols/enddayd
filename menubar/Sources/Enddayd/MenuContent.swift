@@ -40,7 +40,7 @@ struct MenuContent: View {
                 Text("強制終了の回: \(model.enforceListText)")
             }
             if !model.workLimit.isEmpty {
-                Text("作業時間の上限: \(model.workLimit)（その日最初のログインから）")
+                Text("作業時間の上限: \(model.workLimit)（その日最初の操作から）")
             }
             if let deadline = model.timerDeadline {
                 Text("タイマー: \(DaemonModel.timeFormatter.string(from: deadline)) に終了")
@@ -97,7 +97,9 @@ struct MenuContent: View {
         // 同じ場所に混ぜると「今日だけのつもりが毎日変わった」が起きる。
         Menu("今日だけ調整する") {
             ForEach(model.allowedExtendSlots, id: \.self) { minutes in
-                Button("\(model.extendTarget ?? "") の強制終了を \(minutes)分 延ばす") { model.extendToday(minutes) }
+                Button("\(model.extendTarget ?? "") の強制終了を \(minutes)分 延ばす") {
+                    model.extendToday(minutes, target: model.extendTarget)
+                }
             }
             Divider()
             Button("今日はレベルを notify にする（落とさない）") { model.setTodayLevel(.notify) }

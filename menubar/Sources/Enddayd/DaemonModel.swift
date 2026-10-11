@@ -303,8 +303,12 @@ final class DaemonModel: ObservableObject {
     }
 
     /// 今日だけの調整。書き込みは enddayd.sh に任せる（検証を1か所に集める）。
-    func extendToday(_ minutes: Int) {
-        adminAction("/bin/bash \(Admin.shQuote(Self.binPath)) today extend \(minutes)")
+    /// `target` はメニューに出した回（HH:MM）。渡さないとパスワードを入れる
+    /// あいだに時刻が進み、デーモンが別の回を選び直すことがある。
+    func extendToday(_ minutes: Int, target: String? = nil) {
+        var cmd = "/bin/bash \(Admin.shQuote(Self.binPath)) today extend \(minutes)"
+        if let target { cmd += " \(Admin.shQuote(target))" }
+        adminAction(cmd)
     }
 
     func setTodayLevel(_ level: EnforceLevel) {
