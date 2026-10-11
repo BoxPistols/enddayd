@@ -11,6 +11,9 @@ import Foundation
 struct TodayOverride: Equatable {
     /// 強制終了を後ろへずらす分数。0 なら延長なし。
     var extendMinutes = 0
+    /// 延ばす回（延長前の強制終了 HH:MM）。nil は複数回に対応する前の書き方で、
+    /// TIMES の強制終了を指す（enddayd.sh の read_today と同じ扱い）。
+    var target: String?
     /// 今日だけ差し替えるレベル。nil なら設定のまま。
     var level: EnforceLevel?
 
@@ -19,7 +22,10 @@ struct TodayOverride: Equatable {
     /// 人が読む1行。無ければ空。
     var summary: String {
         var parts: [String] = []
-        if extendMinutes > 0 { parts.append("強制終了を \(extendMinutes)分 延長") }
+        if extendMinutes > 0 {
+            let which = target.map { "\($0) の" } ?? ""
+            parts.append("\(which)強制終了を \(extendMinutes)分 延長")
+        }
         if let level { parts.append("レベルを \(level.rawValue) に変更") }
         return parts.joined(separator: " / ")
     }
@@ -41,6 +47,7 @@ enum TodayOverrideParser {
         var out = TodayOverride()
         if let raw = dict["EXTEND"], let n = Int(raw), slots.contains(n) {
             out.extendMinutes = n
+            out.target = dict["TARGET"]
         }
         if let raw = dict["LEVEL"], let level = EnforceLevel(rawValue: raw) {
             out.level = level
@@ -52,9 +59,17 @@ enum TodayOverrideParser {
     ///
     /// 日をまたぐ延長はデーモンが拒否するので、メニューにも出さない。
     /// 押しても必ず失敗する項目を並べるくらいなら、出さないほうがよい。
-    static func allowedSlots(lastEnforce: String, killGrace: Int) -> [Int] {
+    ///
+    /// `nextNotice` は次の回の予告（分）。延長がそこに食い込むとデーモンが
+    /// 拒否するので、それも出さない。
+    static func allowedSlots(lastEnforce: String, killGrace: Int, nextNotice: Int? = nil) -> [Int] {
         guard let last = ConfParser.minutes(of: lastEnforce) else { return [] }
         let endOfDay = 24 * 60 - 1
-        return slots.filter { last + $0 + killGrace <= endOfDay }
+        return slots.filter { slot in
+            let end = last + slot + killGrace
+            if end > endOfDay { return false }
+            if let nextNotice, end >= nextNotice { return false }
+            return true
+        }
     }
 }

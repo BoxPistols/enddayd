@@ -36,6 +36,15 @@ struct MenuContent: View {
         } else {
             let days = model.weekdays.sorted().map(DaemonModel.weekdayName).joined()
             Text("\(days) \(model.times[0]) 予告 → \(model.times[3]) 終了（\(model.level.rawValue)）")
+            if !model.extraEnforce.isEmpty {
+                Text("強制終了の回: \(model.enforceListText)")
+            }
+            if !model.workLimit.isEmpty {
+                Text("作業時間の上限: \(model.workLimit)（その日最初のログインから）")
+            }
+            if let deadline = model.timerDeadline {
+                Text("タイマー: \(DaemonModel.timeFormatter.string(from: deadline)) に終了")
+            }
             if !model.daemonLoaded {
                 Text("常駐していません。「本体を入れ直す」で復帰します")
             } else if model.dryRun {
@@ -88,7 +97,7 @@ struct MenuContent: View {
         // 同じ場所に混ぜると「今日だけのつもりが毎日変わった」が起きる。
         Menu("今日だけ調整する") {
             ForEach(model.allowedExtendSlots, id: \.self) { minutes in
-                Button("強制終了を \(minutes)分 延ばす") { model.extendToday(minutes) }
+                Button("\(model.extendTarget ?? "") の強制終了を \(minutes)分 延ばす") { model.extendToday(minutes) }
             }
             Divider()
             Button("今日はレベルを notify にする（落とさない）") { model.setTodayLevel(.notify) }
@@ -99,6 +108,18 @@ struct MenuContent: View {
             }
         }
         .disabled(model.busy)
+
+        // 時刻ではなく長さで決める終了。今日だけの調整（緩める側）とは逆向きなので分けて置く。
+        Menu("タイマーで終了する") {
+            ForEach([15, 30, 60, 90, 120], id: \.self) { minutes in
+                Button("今から \(minutes)分後") { model.startTimer(minutes) }
+            }
+            if model.timerDeadline != nil {
+                Divider()
+                Button("タイマーを取り消す") { model.cancelTimer() }
+            }
+        }
+        .disabled(model.busy || !model.installed)
 
         Button("時刻・曜日・レベルを変更…") {
             openWindow(id: "schedule")

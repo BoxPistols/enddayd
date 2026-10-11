@@ -17,6 +17,7 @@ final class DaemonModel: ObservableObject {
     nonisolated static let dryPath   = "/etc/enddayd.dryrun"
     nonisolated static let skipPath  = "/etc/enddayd.skip"
     nonisolated static let todayPath = "/etc/enddayd.today"
+    nonisolated static let timerPath = "/etc/enddayd.timer"
     nonisolated static let logPath   = "/var/log/enddayd.log"
 
     // --- 読み取った状態 ---
@@ -27,6 +28,8 @@ final class DaemonModel: ObservableObject {
     @Published private(set) var confWarnings: [String] = []
     @Published private(set) var logFacts = LogFacts()
     @Published private(set) var today = TodayOverride()
+    /// 「今から N 分」のタイマーの締切。無ければ nil。
+    @Published private(set) var timerDeadline: Date?
 
     /// launchd に実際に登録されているか。ファイルの有無とは別で、
     /// plist が残ったまま外れている状態を見分けるために要る。
@@ -44,18 +47,46 @@ final class DaemonModel: ObservableObject {
     var killGrace: Int { conf.killGrace }
     var confBroken: Bool { conf.isBroken }
     var confProblems: [String] { conf.problems }
+    var extraEnforce: [String] { conf.extraEnforce }
+    var workLimit: String { conf.workLimit }
 
-    /// 今日だけの調整で、実際に受け付けてもらえる延長。
-    /// 日をまたぐぶんはデーモンが拒否するのでメニューにも出さない。
-    var allowedExtendSlots: [Int] {
-        TodayOverrideParser.allowedSlots(lastEnforce: conf.times[3], killGrace: conf.killGrace)
+    /// その日の回（強制終了の早い順）
+    var sessions: [ConfParser.Session] { ConfParser.sessions(conf) }
+
+    /// 各回の強制終了を「12:00 / 15:00 / 18:50」の形で
+    var enforceListText: String {
+        sessions.map { ConfParser.hhmm(killMinute(of: $0)) }.joined(separator: " / ")
     }
 
-    /// 今日の実際の強制終了時刻（延長を含む）
-    var effectiveEnforceTime: String {
-        guard let base = ConfParser.minutes(of: conf.times[3]) else { return conf.times[3] }
-        let at = base + today.extendMinutes
-        return String(format: "%02d:%02d", at / 60, at % 60)
+    /// 延長を含めた、その回の実際の強制終了（分）。TARGET が無い延長は TIMES の回に掛かる。
+    func killMinute(of session: ConfParser.Session) -> Int {
+        let target = today.target ?? conf.times[3]
+        guard today.extendMinutes > 0, ConfParser.minutes(of: target) == session.enforce else {
+            return session.enforce
+        }
+        return session.enforce + today.extendMinutes
+    }
+
+    /// 「今日だけ延ばす」が掛かる回。enddayd.sh の next_session_hhmm と同じく、
+    /// 延長後の時刻がまだ来ていない最初の回。無ければ nil。
+    var extendTargetIndex: Int? {
+        let now = Self.minuteOfDay(Date())
+        return sessions.firstIndex { killMinute(of: $0) >= now }
+    }
+
+    var extendTarget: String? {
+        extendTargetIndex.map { ConfParser.hhmm(sessions[$0].enforce) }
+    }
+
+    /// 今日だけの調整で、実際に受け付けてもらえる延長。
+    /// 日をまたぐぶんと、次の回の予告に食い込むぶんはデーモンが拒否するので
+    /// メニューにも出さない。
+    var allowedExtendSlots: [Int] {
+        guard let idx = extendTargetIndex else { return [] }
+        let list = sessions
+        let next = idx + 1 < list.count ? list[idx + 1].notice : nil
+        return TodayOverrideParser.allowedSlots(lastEnforce: ConfParser.hhmm(list[idx].enforce),
+                                                killGrace: conf.killGrace, nextNotice: next)
     }
 
     var logTail: [String] { logFacts.tail }
@@ -91,6 +122,7 @@ final class DaemonModel: ObservableObject {
 
         readConf()
         readToday()
+        readTimer()
         readLog()
         refreshProbes()
     }
@@ -111,6 +143,19 @@ final class DaemonModel: ObservableObject {
             return
         }
         today = TodayOverrideParser.parse(text, today: Self.dateFormatter.string(from: Date()))
+    }
+
+    /// タイマーの締切。読めない・過ぎているものは無いものとして扱う
+    /// （デーモンは猶予を過ぎたものを消す。ここで残りを負で出しても読めない）。
+    private func readTimer() {
+        guard let text = try? String(contentsOfFile: Self.timerPath, encoding: .utf8),
+              let raw = ConfParser.keyValues(text)["DEADLINE"],
+              let epoch = TimeInterval(raw) else {
+            timerDeadline = nil
+            return
+        }
+        let deadline = Date(timeIntervalSince1970: epoch)
+        timerDeadline = deadline > Date() ? deadline : nil
     }
 
     private func readLog() {
@@ -157,32 +202,40 @@ final class DaemonModel: ObservableObject {
         // 「入れたのに何も起きない」になるので、停止中と区別して出す。
         if !daemonLoaded { return "未常駐" }
         if dryRun { return "停止中" }
+        // タイマーは自分で押したものなので、スキップ中でも出す
+        if let deadline = timerDeadline, deadline.timeIntervalSinceNow < 60 * 60 {
+            return "タイマー あと\(max(Int(deadline.timeIntervalSinceNow / 60), 0))分"
+        }
         if skipToday && isScheduledToday { return "今日は休み" }
         guard let next = nextEnforceDate() else { return "" }
         let minutes = Int(next.timeIntervalSinceNow / 60)
         if Calendar.current.isDateInToday(next) && minutes < 60 {
             return "あと\(max(minutes, 0))分"
         }
-        return times[3]
+        return Self.timeFormatter.string(from: next)
     }
 
     var isScheduledToday: Bool {
         weekdays.contains(Self.isoWeekday(of: Date()))
     }
 
-    /// 次に強制終了が来る日時（スキップ・ドライランは考慮しない素の予定）
+    /// 次に強制終了が来る日時（スキップ・ドライラン・延長は考慮しない素の予定）。
+    /// 1日に複数回あれば、その中でいちばん近いもの。
     func nextEnforceDate() -> Date? {
-        guard let (h, m) = Self.parseTime(times[3]) else { return nil }
+        let enforces = sessions.map(\.enforce)
+        guard !enforces.isEmpty else { return nil }
         let cal = Calendar.current
         let now = Date()
         for offset in 0..<8 {
             guard let day = cal.date(byAdding: .day, value: offset, to: now) else { continue }
             guard weekdays.contains(Self.isoWeekday(of: day)) else { continue }
-            var comps = cal.dateComponents([.year, .month, .day], from: day)
-            comps.hour = h
-            comps.minute = m
-            guard let candidate = cal.date(from: comps) else { continue }
-            if candidate > now { return candidate }
+            for at in enforces {
+                var comps = cal.dateComponents([.year, .month, .day], from: day)
+                comps.hour = at / 60
+                comps.minute = at % 60
+                guard let candidate = cal.date(from: comps) else { continue }
+                if candidate > now { return candidate }
+            }
         }
         return nil
     }
@@ -260,6 +313,15 @@ final class DaemonModel: ObservableObject {
         adminAction("/bin/bash \(Admin.shQuote(Self.binPath)) today clear")
     }
 
+    /// 今から N 分後に終了する。分数の範囲は enddayd.sh が検証する。
+    func startTimer(_ minutes: Int) {
+        adminAction("/bin/bash \(Admin.shQuote(Self.binPath)) timer start \(minutes)")
+    }
+
+    func cancelTimer() {
+        adminAction("/bin/bash \(Admin.shQuote(Self.binPath)) timer cancel")
+    }
+
     func rehearsal() {
         adminAction("/bin/bash \(Admin.shQuote(Self.binPath)) rehearsal 5")
     }
@@ -278,6 +340,10 @@ final class DaemonModel: ObservableObject {
             "LOGOUT_ATTEMPT=\"\(logout ? 1 : 0)\"",
             "ALLOW_BYPASS=\"\(bypass ? 1 : 0)\"",
             "KILL_GRACE=\"\(grace)\"",
+            // この2つは画面ではまだ編集できない。いまの値をそのまま書き戻す。
+            // 書かなければ、時刻を直して保存しただけで黙って消える。
+            "EXTRA_ENFORCE=\"\(conf.extraEnforce.joined(separator: ","))\"",
+            "WORK_LIMIT=\"\(conf.workLimit)\"",
         ]
         // 値の文字種は数字・コロン・カンマ・英小文字に限られるので printf で安全に書ける
         let content = lines.joined(separator: "\\n")
@@ -309,6 +375,18 @@ final class DaemonModel: ObservableObject {
         f.locale = Locale(identifier: "en_US_POSIX")
         return f
     }()
+
+    static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+
+    static func minuteOfDay(_ date: Date) -> Int {
+        let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return (c.hour ?? 0) * 60 + (c.minute ?? 0)
+    }
 
     static func isValidTime(_ s: String) -> Bool {
         parseTime(s) != nil

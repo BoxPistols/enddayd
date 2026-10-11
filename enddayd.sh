@@ -8,19 +8,25 @@
 #   sudo ./enddayd.sh reload           設定ファイルを手で編集した後に反映
 #   sudo ./enddayd.sh dryrun on|off    ドライランの切り替え
 #   sudo ./enddayd.sh today [...]      今日だけの調整（延長・レベル）。翌日は自動で戻る
+#   sudo ./enddayd.sh timer [...]      今から N 分後に終了するタイマー
 #   sudo ./enddayd.sh status           状態と直近のログ
 #   sudo ./enddayd.sh rehearsal [秒]   全段階を圧縮して今すぐ確認
 #   sudo ./enddayd.sh stage <名前>     単一ステージだけ確認
 #   sudo ./enddayd.sh plist            生成される plist を表示
 #   sudo ./enddayd.sh log              ログを追う
 #   sudo ./enddayd.sh uninstall        削除
-#   sudo ./enddayd.sh run              LaunchDaemon から呼ばれる本体
+#   sudo ./enddayd.sh run              LaunchDaemon から呼ばれる本体（時刻指定）
+#   sudo ./enddayd.sh tick             LaunchDaemon から毎分呼ばれる本体（タイマー）
 #
 # 既定のスケジュール（月〜金）
 #   18:00  終了準備のアラート
 #   18:30  警告 + ログアウト試行
 #   18:45  最終通告
 #   18:50  強制終了（レベルに応じて挙動が変わる）
+#
+# 強制終了は1日に何回でも置ける（EXTRA_ENFORCE="12:00,15:00"）。各回の
+# 予告・警告・最終通告は、上の4段階と同じ間隔で前に付く。
+# 時刻ではなく長さで決めることもできる（timer / WORK_LIMIT）。
 #
 set -uo pipefail
 
@@ -36,6 +42,17 @@ BYPASS=/etc/enddayd.skip
 DRYFLAG=/etc/enddayd.dryrun
 NEWSYSLOG=/etc/newsyslog.d/enddayd.conf
 TODAY_FILE=/etc/enddayd.today
+TIMER_FILE=/etc/enddayd.timer
+WORKSTART_FILE=/etc/enddayd.workstart
+
+# タイマー（今から N 分・作業開始から N 時間）用の監視デーモン。
+#
+# 時刻指定のほうは plist にトリガを固定で書けるが、タイマーの締切は
+# 押した時刻で決まるので前もって書けない。そこで毎分起きて締切を見る
+# ジョブを別に置く。本体（${LABEL}）に毎分の発火を混ぜると、予告の時間帯に
+# 毎分アラートが出てしまうので分ける。
+TICK_LABEL=local.enddayd.tick
+TICK_PLIST="/Library/LaunchDaemons/${TICK_LABEL}.plist"
 
 # 「今日だけ」の延長で選べる分数。
 #
@@ -46,6 +63,17 @@ TODAY_FILE=/etc/enddayd.today
 # 上限を 120 分にしてあるのは、いくらでも延ばせるなら当日スキップと
 # 変わらなくなるため。緩めるための仕組みが、素通しの仕組みになっては困る。
 EXTEND_SLOTS="30 60 90 120"
+
+# タイマーの各段階を締切の何分前に出すか（予告・警告・最終通告）。
+# 時刻指定の4段階は設定で決めるが、タイマーは長さが毎回違うので固定にする。
+# 締切までがこれより短ければ、届かない段階は出さずに次から始める。
+TIMER_NOTICE_MIN=10
+TIMER_WARN_MIN=5
+TIMER_FINAL_MIN=1
+
+# タイマーで指定できる長さの上限（分）。延長の上限と同じ理屈で、
+# いくらでも先にできるなら「止める」と変わらなくなる。
+TIMER_MAX_MIN=720
 
 GRACE_SOUND=/System/Library/Sounds/Sosumi.aiff
 FINAL_SOUND=/System/Library/Sounds/Basso.aiff
@@ -63,6 +91,8 @@ LEVEL="normal"                    # notify | soft | normal | hard
 LOGOUT_ATTEMPT="1"                # 警告時にログアウトを試みるか
 ALLOW_BYPASS="1"                  # 当日スキップを許すか
 KILL_GRACE="10"                   # 最終ステージを受け付ける猶予（分）
+EXTRA_ENFORCE=""                  # 追加の強制終了時刻（例: "12:00,15:00"）。空なら無し
+WORK_LIMIT=""                     # 作業開始からの上限（例: "8" や "7:30"）。空なら無し
 
 CONF_SYNTAX_ERROR=0
 if [ -f "$CONF" ]; then
@@ -254,18 +284,138 @@ validate_conf() {
     *) conf_err "ALLOW_BYPASS は 0 か 1 です: ALLOW_BYPASS=\"$ALLOW_BYPASS\"" ;;
   esac
 
+  if [ -n "$WORK_LIMIT" ] && [ -z "$(work_limit_min)" ]; then
+    conf_err "WORK_LIMIT は 時間（\"8\"）か 時間:分（\"7:30\"）で、1分〜23:59 の範囲です: WORK_LIMIT=\"$WORK_LIMIT\""
+  fi
+
+  # 追加の強制終了は TIMES の間隔を借りるので、TIMES と猶予が読めたときだけ見る
+  [ -z "$CONF_ERRORS" ] && validate_extras
+
   # 妥当な設定に対してだけ注意書きを作る。壊れているなら直すべきは
   # そちらで、警告を重ねても読み手を迷わせるだけ。
   if [ -z "$CONF_ERRORS" ]; then
     local last end_of_day
-    last=$(to_min "${ta[3]}")
+    last="${SES_3[$((SES_N - 1))]}"   # その日最後の回
     end_of_day=$((24 * 60 - 1))
     if [ $((last + KILL_GRACE)) -gt "$end_of_day" ]; then
-      conf_warn "猶予が日をまたぎます。${ta[3]} から ${KILL_GRACE}分 は 23:59 で切れるので、実際に受け付けるのは $((end_of_day - last))分 です"
+      conf_warn "猶予が日をまたぎます。$(to_hhmm "$last") から ${KILL_GRACE}分 は 23:59 で切れるので、実際に受け付けるのは $((end_of_day - last))分 です"
     fi
   fi
 
   [ -z "$CONF_ERRORS" ]
+}
+
+# WORK_LIMIT を分に直す。空・不正なら何も出さない。
+work_limit_min() {
+  local h m total
+  case "$WORK_LIMIT" in
+    [0-9]|[0-9][0-9]) h="$WORK_LIMIT"; m=0 ;;
+    [0-9]:[0-5][0-9]|[0-9][0-9]:[0-5][0-9]) h="${WORK_LIMIT%%:*}"; m="${WORK_LIMIT##*:}" ;;
+    *) return 0 ;;
+  esac
+  total=$((10#$h * 60 + 10#$m))
+  [ "$total" -ge 1 ] && [ "$total" -le $((24 * 60 - 1)) ] && echo "$total"
+  return 0
+}
+
+# WORK_LIMIT を「8時間」「7時間30分」の形にする
+work_limit_label() {
+  local t
+  t=$(work_limit_min)
+  [ -n "$t" ] || { echo "$WORK_LIMIT"; return 0; }
+  if [ $((t % 60)) -eq 0 ]; then echo "$((t / 60))時間"
+  elif [ "$t" -lt 60 ]; then echo "${t}分"
+  else echo "$((t / 60))時間$((t % 60))分"; fi
+}
+
+# ------------------------------------------------------- 1日の回 ---
+#
+# 強制終了は TIMES の4つ目と EXTRA_ENFORCE の各時刻。どの回も
+# 予告・警告・最終通告を TIMES と同じ間隔で前に持つ（既定なら 50分前・
+# 20分前・5分前）。回ごとに4つずつ書かせると設定が長くなるうえ、
+# 並びの検証を回の数だけ繰り返すことになる。
+#
+# SES_0..SES_3 は各回の 予告・警告・最終通告・強制終了（0:00 からの分）で、
+# 強制終了の早い順に並ぶ。bash 3.2 は空の配列を "${a[@]}" で展開すると
+# set -u で落ちるので、走査は SES_N までの添字で回すこと。
+
+SES_N=0
+SES_0=(); SES_1=(); SES_2=(); SES_3=()
+
+build_sessions() {
+  local ta xa x e m3 l0 l1 l2 list
+  IFS=',' read -r -a ta <<<"$TIMES"
+  m3=$(to_min "${ta[3]}")
+  l0=$((m3 - $(to_min "${ta[0]}")))
+  l1=$((m3 - $(to_min "${ta[1]}")))
+  l2=$((m3 - $(to_min "${ta[2]}")))
+  list="$m3"
+  if [ -n "$EXTRA_ENFORCE" ]; then
+    IFS=',' read -r -a xa <<<"$EXTRA_ENFORCE"
+    for x in "${xa[@]}"; do list="$list $(to_min "$x")"; done
+  fi
+  SES_N=0
+  SES_0=(); SES_1=(); SES_2=(); SES_3=()
+  # shellcheck disable=SC2086  # 分の数字だけなので分割してよい
+  for e in $(printf '%s\n' $list | sort -n); do
+    SES_0[SES_N]=$((e - l0))
+    SES_1[SES_N]=$((e - l1))
+    SES_2[SES_N]=$((e - l2))
+    SES_3[SES_N]=$e
+    SES_N=$((SES_N + 1))
+  done
+}
+
+# EXTRA_ENFORCE を確かめ、通れば SES_* を組み立てる。
+# 回どうしが重なると、ある時刻がどちらの回の何段階目なのか決められない。
+# 黙ってどちらかに寄せるより、設定の段階で断る。
+validate_extras() {
+  local ta xa x m seen i prev_end
+  IFS=',' read -r -a ta <<<"$TIMES"
+  seen=" $(to_min "${ta[3]}") "
+  if [ -n "$EXTRA_ENFORCE" ]; then
+    IFS=',' read -r -a xa <<<"$EXTRA_ENFORCE"
+    for x in "${xa[@]}"; do
+      if ! valid_time "$x"; then
+        conf_err "EXTRA_ENFORCE の \"$x\" が HH:MM ではありません: EXTRA_ENFORCE=\"$EXTRA_ENFORCE\""
+        return 1
+      fi
+      m=$(to_min "$x")
+      case "$seen" in
+        *" $m "*) conf_err "EXTRA_ENFORCE の $x が他の強制終了と重複しています: EXTRA_ENFORCE=\"$EXTRA_ENFORCE\""; return 1 ;;
+      esac
+      seen="${seen}${m} "
+    done
+  fi
+
+  build_sessions
+
+  i=0
+  while [ "$i" -lt "$SES_N" ]; do
+    if [ "${SES_0[$i]}" -lt 0 ]; then
+      conf_err "$(to_hhmm "${SES_3[$i]}") の予告（$((SES_3[i] - SES_0[i]))分前）が 0:00 より前になります。もっと遅い時刻にしてください"
+      return 1
+    fi
+    if [ "$i" -gt 0 ]; then
+      prev_end=$((SES_3[i - 1] + KILL_GRACE))
+      if [ "$prev_end" -ge "${SES_0[$i]}" ]; then
+        conf_err "$(to_hhmm "${SES_3[$((i - 1))]}") の猶予（${KILL_GRACE}分）と $(to_hhmm "${SES_3[$i]}") の予告（$(to_hhmm "${SES_0[$i]}")）が重なります。間を空けてください"
+        return 1
+      fi
+    fi
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# 各回の強制終了時刻を「12:00 / 15:00 / 18:50」の形で並べる
+enforce_list() {
+  local i=0 out=""
+  while [ "$i" -lt "$SES_N" ]; do
+    out="${out:+$out / }$(to_hhmm "${SES_3[$i]}")"
+    i=$((i + 1))
+  done
+  echo "$out"
 }
 
 # 検証を通ったときだけ配列に展開する。壊れた設定で ${T_ARR[3]} を
@@ -300,6 +450,7 @@ require_valid_conf() {
 TODAY_EXTEND=0
 TODAY_LEVEL=""
 TODAY_ERROR=""
+TODAY_IDX=-1   # 延長する回の添字（SES_*）。延長が無ければ -1
 
 # /etc/enddayd.today を読む。壊れていても走行は止めない（緩める側の指定なので、
 # 無視すれば元の（厳しい）スケジュールで動く）。理由はログに残す。
@@ -307,9 +458,11 @@ read_today() {
   TODAY_EXTEND=0
   TODAY_LEVEL=""
   TODAY_ERROR=""
+  TODAY_IDX=-1
   [ -f "$TODAY_FILE" ] || return 0
+  [ -z "$CONF_ERRORS" ] || return 0   # 回が組めないので照合できない（走行側は既に止まっている）
 
-  local line key value stamp="" ext="" lv=""
+  local line key value stamp="" ext="" lv="" target=""
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|\#*) continue ;; esac
     key="${line%%=*}"; value="${line#*=}"
@@ -317,6 +470,7 @@ read_today() {
       DATE)   stamp="$value" ;;
       EXTEND) ext="$value" ;;
       LEVEL)  lv="$value" ;;
+      TARGET) target="$value" ;;
     esac
   done <"$TODAY_FILE"
 
@@ -338,25 +492,57 @@ read_today() {
     esac
   fi
 
-  # 日をまたぐ延長は受けない。翌日の曜日判定をどう扱うかが決まっていないので、
-  # 中途半端に効かせるより効かせないほうが読みやすい。
+  # どの回を延ばすか。TARGET が無いのは複数回に対応する前に書かれたもので、
+  # 当時は1日1回だったから TIMES の強制終了を指していた。
   if [ "$TODAY_EXTEND" -gt 0 ] 2>/dev/null; then
-    local last
-    last=$(to_min "${T_ARR[3]}")
-    if [ $((last + TODAY_EXTEND + KILL_GRACE)) -gt $((24 * 60 - 1)) ]; then
-      TODAY_ERROR="${TODAY_ERROR:+$TODAY_ERROR / }延長すると日をまたぐので受け付けません（${T_ARR[3]} + ${TODAY_EXTEND}分 + 猶予${KILL_GRACE}分）"
-      TODAY_EXTEND=0
+    [ -z "$target" ] && target="${T_ARR[3]}"
+    local i=0
+    while [ "$i" -lt "$SES_N" ]; do
+      if valid_time "$target" && [ "${SES_3[$i]}" = "$(to_min "$target")" ]; then TODAY_IDX=$i; fi
+      i=$((i + 1))
+    done
+    if [ "$TODAY_IDX" -lt 0 ]; then
+      TODAY_ERROR="${TODAY_ERROR:+$TODAY_ERROR / }延長する回 \"$target\" が今日の強制終了（$(enforce_list)）にありません"
     fi
   fi
 
-  [ -n "$TODAY_ERROR" ] && TODAY_EXTEND=0
+  # 日をまたぐ延長は受けない。翌日の曜日判定をどう扱うかが決まっていないので、
+  # 中途半端に効かせるより効かせないほうが読みやすい。
+  # 次の回の予告に食い込む延長も受けない。どちらの回の段階か決められなくなる。
+  if [ "$TODAY_EXTEND" -gt 0 ] 2>/dev/null && [ "$TODAY_IDX" -ge 0 ]; then
+    local base end
+    base="${SES_3[$TODAY_IDX]}"
+    end=$((base + TODAY_EXTEND + KILL_GRACE))
+    if [ "$end" -gt $((24 * 60 - 1)) ]; then
+      TODAY_ERROR="${TODAY_ERROR:+$TODAY_ERROR / }延長すると日をまたぐので受け付けません（$(to_hhmm "$base") + ${TODAY_EXTEND}分 + 猶予${KILL_GRACE}分）"
+    elif [ $((TODAY_IDX + 1)) -lt "$SES_N" ] && [ "$end" -ge "${SES_0[$((TODAY_IDX + 1))]}" ]; then
+      TODAY_ERROR="${TODAY_ERROR:+$TODAY_ERROR / }延長すると次の回の予告（$(to_hhmm "${SES_0[$((TODAY_IDX + 1))]}")）に重なるので受け付けません（$(to_hhmm "$base") + ${TODAY_EXTEND}分 + 猶予${KILL_GRACE}分）"
+    fi
+  fi
+
+  if [ -n "$TODAY_ERROR" ]; then TODAY_EXTEND=0; TODAY_IDX=-1; fi
   return 0
+}
+
+# 延長を含めた、その回の実際の強制終了時刻（分）
+session_kill_min() {
+  if [ "$1" = "$TODAY_IDX" ]; then echo $((SES_3[$1] + TODAY_EXTEND)); else echo "${SES_3[$1]}"; fi
+}
+
+# 延長を含めた今日の強制終了時刻を並べる
+today_enforce_list() {
+  local i=0 out=""
+  while [ "$i" -lt "$SES_N" ]; do
+    out="${out:+$out / }$(to_hhmm "$(session_kill_min "$i")")"
+    i=$((i + 1))
+  done
+  echo "$out"
 }
 
 # 今日だけの調整を人が読む形で1行にする。無ければ空。
 today_summary() {
   local parts=""
-  [ "$TODAY_EXTEND" -gt 0 ] 2>/dev/null && parts="強制終了を ${TODAY_EXTEND}分 延長"
+  [ "$TODAY_EXTEND" -gt 0 ] 2>/dev/null && parts="$(to_hhmm "${SES_3[$TODAY_IDX]}") の強制終了を ${TODAY_EXTEND}分 延長"
   [ -n "$TODAY_LEVEL" ] && parts="${parts:+$parts / }レベルを ${TODAY_LEVEL} に変更"
   echo "$parts"
 }
@@ -372,6 +558,7 @@ stage_min() {
 }
 
 daemon_loaded() { /bin/launchctl print "system/${LABEL}" >/dev/null 2>&1; }
+tick_loaded()   { /bin/launchctl print "system/${TICK_LABEL}" >/dev/null 2>&1; }
 
 # ---------------------------------------------------------- 本体 run ---
 
@@ -416,26 +603,37 @@ cmd_run() {
   [ -n "$TODAY_ERROR" ] && log "today override ignored: $TODAY_ERROR"
   [ -n "$TODAY_LEVEL" ] && LEVEL="$TODAY_LEVEL"
 
-  local M0 M1 M2 M3 MK KILL_AT STAGE
-  M0=$(to_min "${T_ARR[0]}"); M1=$(to_min "${T_ARR[1]}")
-  M2=$(to_min "${T_ARR[2]}"); M3=$(to_min "${T_ARR[3]}")
-  MK=$((M3 + TODAY_EXTEND))          # 今日の実際の強制終了時刻
+  # いまの時刻を含む回を探す。回どうしは重ならないよう検証してあるので、
+  # 当たるのは高々1つ。
+  local i=0 k=-1 S0 S1 S2 S3 MK KILL_AT STAGE TITLE
+  while [ "$i" -lt "$SES_N" ]; do
+    MK=$(session_kill_min "$i")
+    if [ "$MIN" -ge "${SES_0[$i]}" ] && [ "$MIN" -le $((MK + KILL_GRACE)) ]; then k=$i; break; fi
+    i=$((i + 1))
+  done
+  if [ "$k" -lt 0 ]; then log "skip: out of window (min=$MIN)"; exit 0; fi
+
+  S0="${SES_0[$k]}"; S1="${SES_1[$k]}"; S2="${SES_2[$k]}"; S3="${SES_3[$k]}"
+  MK=$(session_kill_min "$k")          # 今日の実際の強制終了時刻
   KILL_AT=$(to_hhmm "$MK")
 
   # 延長中は、元の強制終了時刻のトリガと途中の受け皿では何もしない。
   # ここで final を出し直すと最終通告が二重に出る。
-  if [ "$TODAY_EXTEND" -gt 0 ] && [ "$MIN" -ge "$M3" ] && [ "$MIN" -lt "$MK" ]; then
+  if [ "$k" = "$TODAY_IDX" ] && [ "$MIN" -ge "$S3" ] && [ "$MIN" -lt "$MK" ]; then
     log "extended: enforce moved to $KILL_AT (+${TODAY_EXTEND}m)"
     exit 0
   fi
 
-  if   [ "$MIN" -ge "$M0" ] && [ "$MIN" -lt "$M1" ]; then STAGE=notice
-  elif [ "$MIN" -ge "$M1" ] && [ "$MIN" -lt "$M2" ]; then STAGE=warn
-  elif [ "$MIN" -ge "$M2" ] && [ "$MIN" -lt "$MK" ]; then STAGE=final
-  elif [ "$MIN" -ge "$MK" ] && [ "$MIN" -le $((MK + KILL_GRACE)) ]; then STAGE=enforce
-  else log "skip: out of window (min=$MIN)"; exit 0; fi
+  if   [ "$MIN" -lt "$S1" ]; then STAGE=notice
+  elif [ "$MIN" -lt "$S2" ]; then STAGE=warn
+  elif [ "$MIN" -lt "$MK" ]; then STAGE=final
+  else STAGE=enforce; fi
 
-  log "stage=$STAGE level=$LEVEL user=$CONSOLE_USER"
+  if [ "$SES_N" -gt 1 ]; then
+    log "stage=$STAGE level=$LEVEL user=$CONSOLE_USER session=$(to_hhmm "$S3")"
+  else
+    log "stage=$STAGE level=$LEVEL user=$CONSOLE_USER"
+  fi
 
   # 有効だが書いたとおりに効かない設定は、走るたびにログへ残す。
   # status は $LOG しか見せないので、ここに出しておかないと
@@ -444,18 +642,37 @@ cmd_run() {
     log "config warning: $(echo "$CONF_WARNINGS" | tr '\n' ' ')"
   fi
 
+  # 「終業」と言ってよいのはその日最後の回だけ。昼の回で終業と出すと、
+  # 何のための終了なのかが読み取れない。
+  case "$STAGE" in
+    notice)
+      if [ "$k" = $((SES_N - 1)) ]; then TITLE="$(to_hhmm "$S0") — 終業時刻です"
+      else TITLE="$(to_hhmm "$S0") — 区切りの時刻です"; fi ;;
+    warn)  TITLE="$(to_hhmm "$S1") — ここで終わりです" ;;
+    final) TITLE="$(to_hhmm "$S2") — 最終通告" ;;
+    *)     TITLE="" ;;
+  esac
+  perform_stage "$STAGE" "$KILL_AT" "$TITLE"
+}
+
+# 段階ごとの動作。時刻指定（run）とタイマー（tick）で共有する。
+#   perform_stage <段階> <強制終了の時刻 HH:MM> <アラートの見出し>
+# 見出しは notice / warn / final で使う。enforce は時刻から組み立てる。
+# 呼ぶ前に resolve_console が通っていること。
+perform_stage() {
+  local STAGE="$1" KILL_AT="$2" TITLE="$3"
   case "$STAGE" in
 
     notice)
       play "$GRACE_SOUND"
-      alert "$(mark "${T_ARR[0]} — 終業時刻です")" \
+      alert "$(mark "$TITLE")" \
             "作業を切り上げる準備を始めてください。${KILL_AT} に終了します。" 30
       log "notice shown"
       ;;
 
     warn)
       play "$GRACE_SOUND"
-      alert "$(mark "${T_ARR[1]} — ここで終わりです")" \
+      alert "$(mark "$TITLE")" \
             "コミット・保存を済ませてください。${KILL_AT} に強制的に終了します。" 45
       local apps
       if [ "$LOGOUT_ATTEMPT" != "1" ]; then
@@ -486,7 +703,7 @@ cmd_run() {
 
     final)
       play "$FINAL_SOUND"
-      alert "$(mark "${T_ARR[2]} — 最終通告")" \
+      alert "$(mark "$TITLE")" \
             "まもなく終了します（レベル: ${LEVEL}）。保存していない変更は失われます。" 60
       log "final notice shown"
       ;;
@@ -497,7 +714,7 @@ cmd_run() {
         log "would execute level=$LEVEL"
         alert "$(mark "${KILL_AT} — ここで終了します")" \
               "本番ならこの時点で終了していました（レベル: ${LEVEL}）。まだ動いているのはドライラン中だからです。" 60
-        exit 0
+        return 0
       fi
       # 本番でここまで来たことを残す。導入しても「本当に効くのか」は
       # 一度落ちるまで分からないので、status がこの行を見て経路の生死を出す。
@@ -542,28 +759,174 @@ cmd_run() {
   esac
 }
 
+# ------------------------------------------------------ タイマー tick ---
+#
+# 「今から N 分」（timer）と「作業開始から N 時間」（WORK_LIMIT）。
+# どちらも締切が前もって決まらないので、毎分起きる $TICK_LABEL から呼ばれ、
+# 締切までの残りで段階を決める。時刻指定と同じく実行時の時計で判定するので、
+# スリープ復帰後の遅延実行でも誤爆しない。猶予（KILL_GRACE）も同じ意味で効く。
+#
+# 毎分呼ばれるので、同じ段階を二度出さないよう、出した段階を状態ファイルに
+# 残す。強制終了は状態を書いてから実行する。書く前に落とすと、再起動して
+# 猶予内にログインしたとき、もう一度落ちる。
+
+# kv_get <ファイル> <キー> : KEY=VALUE の行から値を拾う。無ければ空。
+kv_get() { sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -n 1; }
+
+# kv_set <ファイル> <キー> <値> : その行だけ差し替える（一時ファイル経由）
+kv_set() {
+  local tmp="$1.new.$$"
+  { grep -v "^$2=" "$1" 2>/dev/null; echo "$2=$3"; } >"$tmp" && mv "$tmp" "$1"
+}
+
+# エポック秒を HH:MM に。BSD（macOS）は -r、GNU は -d @ と書き方が違う。
+epoch_hhmm() { date -r "$1" +%H:%M 2>/dev/null || date -d "@$1" +%H:%M; }
+
+# 締切までの残り秒数から段階を決める。まだ早ければ空、猶予も過ぎていれば missed。
+countdown_stage() {
+  local rem="$1"
+  if   [ "$rem" -gt $((TIMER_NOTICE_MIN * 60)) ]; then echo ""
+  elif [ "$rem" -gt $((TIMER_WARN_MIN * 60)) ]; then echo notice
+  elif [ "$rem" -gt $((TIMER_FINAL_MIN * 60)) ]; then echo warn
+  elif [ "$rem" -gt 0 ]; then echo final
+  elif [ "$rem" -ge $((-KILL_GRACE * 60)) ]; then echo enforce
+  else echo missed; fi
+}
+
+stage_rank() {
+  case "$1" in notice) echo 1 ;; warn) echo 2 ;; final) echo 3 ;; enforce|missed) echo 4 ;; *) echo 0 ;; esac
+}
+
+# 締切までの残りを「約N分」にする（切り上げ）。見出しに使う。
+rem_label() { echo "約$(( ($1 + 59) / 60 ))分"; }
+
+cmd_tick() {
+  # 設定が壊れていることは run が時刻ごとに知らせる。ここで毎分アラートを
+  # 出すと、直すための操作すらできなくなる。
+  [ -n "$CONF_ERRORS" ] && exit 0
+  resolve_console || exit 0
+
+  read_today
+  [ -n "$TODAY_LEVEL" ] && LEVEL="$TODAY_LEVEL"
+
+  local now
+  now=$(date +%s)
+  tick_timer "$now"
+  tick_work_limit "$now"
+  return 0
+}
+
+# 「今から N 分」のタイマー。曜日・当日スキップには従わない。
+# 自分で押したものなので、黙って見送ると押したのに効かないことになる。
+tick_timer() {
+  local now="$1" deadline shown stage kill_at title
+  [ -f "$TIMER_FILE" ] || return 0
+  deadline=$(kv_get "$TIMER_FILE" DEADLINE)
+  shown=$(kv_get "$TIMER_FILE" STAGE)
+  case "$deadline" in
+    ''|*[!0-9]*)
+      log "timer ignored: $TIMER_FILE が読めません（DEADLINE=\"$deadline\"）"
+      rm -f "$TIMER_FILE"; return 0 ;;
+  esac
+
+  stage=$(countdown_stage $((deadline - now)))
+  [ -z "$stage" ] && return 0
+  [ "$(stage_rank "$stage")" -le "$(stage_rank "$shown")" ] && return 0
+  kill_at=$(epoch_hhmm "$deadline")
+
+  if [ "$stage" = "missed" ]; then
+    log "timer missed: ${kill_at} から猶予 ${KILL_GRACE}分 を過ぎていました（スリープ中だった可能性）"
+    rm -f "$TIMER_FILE"; return 0
+  fi
+  if [ "$stage" = "enforce" ]; then rm -f "$TIMER_FILE"; else kv_set "$TIMER_FILE" STAGE "$stage"; fi
+
+  case "$stage" in
+    notice) title="タイマー — 残り$(rem_label $((deadline - now)))です" ;;
+    warn)   title="タイマー — ここで終わりです（残り$(rem_label $((deadline - now)))）" ;;
+    final)  title="タイマー — 最終通告" ;;
+    *)      title="" ;;
+  esac
+  log "timer stage=$stage level=$LEVEL user=$CONSOLE_USER deadline=$kill_at"
+  perform_stage "$stage" "$kill_at" "$title"
+}
+
+# 「作業開始から N 時間」。開始は、設定した曜日にその日初めて GUI ユーザーを
+# 見た時刻。日付印つきで残すので、再起動しても開始は巻き戻らない
+# （巻き戻るなら、再起動するだけで延ばせてしまう）。
+tick_work_limit() {
+  local now="$1" limit today stamp start shown deadline stage kill_at title w hit=0
+  [ -n "$WORK_LIMIT" ] || return 0
+  limit=$(work_limit_min)
+  [ -n "$limit" ] || return 0
+
+  for w in "${W_ARR[@]}"; do [ "$w" = "$(date +%u)" ] && hit=1; done
+  [ "$hit" = "1" ] || return 0
+  if [ "$ALLOW_BYPASS" = "1" ] && [ -f "$BYPASS" ] \
+     && [ "$(cat "$BYPASS" 2>/dev/null)" = "$(date +%F)" ]; then
+    return 0
+  fi
+
+  today=$(date +%F)
+  stamp=$(kv_get "$WORKSTART_FILE" DATE)
+  start=$(kv_get "$WORKSTART_FILE" START)
+  case "$start" in ''|*[!0-9]*) stamp="" ;; esac
+  if [ "$stamp" != "$today" ]; then
+    start="$now"
+    {
+      echo "# enddayd が置いた作業開始の記録。日付が変われば取り直す。"
+      echo "DATE=$today"
+      echo "START=$start"
+    } >"${WORKSTART_FILE}.new.$$" && mv "${WORKSTART_FILE}.new.$$" "$WORKSTART_FILE"
+    log "work start: $(epoch_hhmm "$start")（上限 $(work_limit_label) → $(epoch_hhmm $((start + limit * 60))) に終了）"
+  fi
+  shown=$(kv_get "$WORKSTART_FILE" STAGE)
+  deadline=$((start + limit * 60))
+
+  stage=$(countdown_stage $((deadline - now)))
+  [ -z "$stage" ] && return 0
+  [ "$(stage_rank "$stage")" -le "$(stage_rank "$shown")" ] && return 0
+  kill_at=$(epoch_hhmm "$deadline")
+  kv_set "$WORKSTART_FILE" STAGE "$stage"
+
+  if [ "$stage" = "missed" ]; then
+    log "work limit missed: ${kill_at} から猶予 ${KILL_GRACE}分 を過ぎていました（スリープ中だった可能性）"
+    return 0
+  fi
+
+  case "$stage" in
+    notice) title="作業時間の上限 — 残り$(rem_label $((deadline - now)))です" ;;
+    warn)   title="作業時間の上限 — ここで終わりです（残り$(rem_label $((deadline - now)))）" ;;
+    final)  title="作業時間の上限 — 最終通告" ;;
+    *)      title="" ;;
+  esac
+  log "work limit stage=$stage level=$LEVEL user=$CONSOLE_USER deadline=$kill_at"
+  perform_stage "$stage" "$kill_at" "$title"
+}
+
 # ------------------------------------------------------------ plist ---
 
 gen_plist() {
   require_valid_conf || return 1
-  local entries="" d t h m slot last at
-  last=$(to_min "${T_ARR[3]}")
+  local entries="" d i at slot
   for d in "${W_ARR[@]}"; do
-    for t in "${T_ARR[@]}"; do
-      h=$((10#${t%%:*})); m=$((10#${t##*:}))
-      entries+="    <dict><key>Weekday</key><integer>${d}</integer>"
-      entries+="<key>Hour</key><integer>${h}</integer>"
-      entries+="<key>Minute</key><integer>${m}</integer></dict>"$'\n'
-    done
-    # 「今日だけ延ばす」の受け皿。トリガは plist に固定で書くものなので、
-    # 延ばした先に発火が無ければ何も起きない。選べる分数と1対1で置く。
-    # 延長していない日は run が「窓の外」と判定して何もしない。
-    for slot in $EXTEND_SLOTS; do
-      at=$((last + slot))
-      [ "$at" -gt $((24 * 60 - 1)) ] && continue   # 日をまたぐぶんは置かない
-      entries+="    <dict><key>Weekday</key><integer>${d}</integer>"
-      entries+="<key>Hour</key><integer>$((at / 60))</integer>"
-      entries+="<key>Minute</key><integer>$((at % 60))</integer></dict>"$'\n'
+    i=0
+    while [ "$i" -lt "$SES_N" ]; do
+      for at in "${SES_0[$i]}" "${SES_1[$i]}" "${SES_2[$i]}" "${SES_3[$i]}"; do
+        entries+="    <dict><key>Weekday</key><integer>${d}</integer>"
+        entries+="<key>Hour</key><integer>$((at / 60))</integer>"
+        entries+="<key>Minute</key><integer>$((at % 60))</integer></dict>"$'\n'
+      done
+      # 「今日だけ延ばす」の受け皿。トリガは plist に固定で書くものなので、
+      # 延ばした先に発火が無ければ何も起きない。選べる分数と1対1で、回ごとに置く。
+      # 延長していない日は run が「窓の外」と判定して何もしない。
+      for slot in $EXTEND_SLOTS; do
+        at=$((SES_3[i] + slot))
+        [ "$at" -gt $((24 * 60 - 1)) ] && continue   # 日をまたぐぶんは置かない
+        entries+="    <dict><key>Weekday</key><integer>${d}</integer>"
+        entries+="<key>Hour</key><integer>$((at / 60))</integer>"
+        entries+="<key>Minute</key><integer>$((at % 60))</integer></dict>"$'\n'
+      done
+      i=$((i + 1))
     done
   done
 
@@ -593,6 +956,34 @@ ${entries}  </array>
 EOF
 }
 
+# タイマー監視の plist。毎分起きて、タイマーと作業時間の上限を見る。
+# 何も設定していなければ何もせずに終わる（ログにも書かない）。
+gen_tick_plist() {
+  cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${TICK_LABEL}</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>${BIN}</string>
+    <string>tick</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>60</integer>
+
+  <key>StandardErrorPath</key>
+  <string>${ERRLOG}</string>
+</dict>
+</plist>
+EOF
+}
+
 write_conf() {
   cat >"$CONF" <<EOF
 # enddayd 設定ファイル。手で編集したら sudo $BIN reload を実行してください。
@@ -603,6 +994,10 @@ LEVEL="$LEVEL"
 LOGOUT_ATTEMPT="$LOGOUT_ATTEMPT"
 ALLOW_BYPASS="$ALLOW_BYPASS"
 KILL_GRACE="$KILL_GRACE"
+# 追加の強制終了（例: "12:00,15:00"）。予告などは TIMES と同じ間隔で前に付く
+EXTRA_ENFORCE="$EXTRA_ENFORCE"
+# 作業開始からの上限（例: "8" や "7:30"）。開始はその日最初にログインを見た時刻
+WORK_LIMIT="$WORK_LIMIT"
 EOF
   chmod 644 "$CONF"; chown root:wheel "$CONF"
 }
@@ -612,27 +1007,34 @@ EOF
 # bootstrap も失敗して、デーモンが黙って消える。
 load_daemon() {
   require_valid_conf || return 1
+  install_plist "$PLIST" "$LABEL" gen_plist || return 1
+  install_plist "$TICK_PLIST" "$TICK_LABEL" gen_tick_plist || return 1
+  return 0
+}
 
-  local tmp="${PLIST}.new.$$"
-  if ! gen_plist >"$tmp"; then
-    rm -f "$tmp"; echo "plist の生成に失敗しました" >&2; return 1
+# install_plist <置き先> <ラベル> <生成する関数>
+install_plist() {
+  local dest="$1" label="$2" generator="$3"
+  local tmp="${dest}.new.$$"
+  if ! "$generator" >"$tmp"; then
+    rm -f "$tmp"; echo "plist の生成に失敗しました（${dest}）" >&2; return 1
   fi
   if command -v plutil >/dev/null 2>&1; then
     if ! plutil -lint "$tmp" >/dev/null 2>&1; then
-      rm -f "$tmp"; echo "生成した plist が不正です（差し替えていません）" >&2; return 1
+      rm -f "$tmp"; echo "生成した plist が不正です（${dest} は差し替えていません）" >&2; return 1
     fi
   fi
 
-  /bin/launchctl bootout system "$PLIST" 2>/dev/null || true
+  /bin/launchctl bootout system "$dest" 2>/dev/null || true
   chown root:wheel "$tmp" 2>/dev/null || true
   chmod 644 "$tmp"
-  if ! mv "$tmp" "$PLIST"; then
-    rm -f "$tmp"; echo "$PLIST を更新できませんでした" >&2; return 1
+  if ! mv "$tmp" "$dest"; then
+    rm -f "$tmp"; echo "$dest を更新できませんでした" >&2; return 1
   fi
-  if ! /bin/launchctl bootstrap system "$PLIST"; then
-    echo "/bin/launchctl bootstrap に失敗しました（${PLIST}）" >&2; return 1
+  if ! /bin/launchctl bootstrap system "$dest"; then
+    echo "/bin/launchctl bootstrap に失敗しました（${dest}）" >&2; return 1
   fi
-  /bin/launchctl enable "system/${LABEL}" || true
+  /bin/launchctl enable "system/${label}" || true
   return 0
 }
 
@@ -828,6 +1230,32 @@ cmd_setup() {
   done
   echo
 
+  # --- 1日に複数回 ---
+  # 猶予を聞いたあとに置く。回どうしが重ならないかは猶予で決まる。
+  echo "【追加の強制終了】${T_ARR[3]} のほかにも落とす時刻（例: 12:00,15:00）"
+  echo "  予告・警告・最終通告は上の4段階と同じ間隔で前に付きます。無しにするなら -"
+  while :; do
+    ask "  時刻（カンマ区切り）" "${EXTRA_ENFORCE:--}"
+    [ "$REPLY_VAL" = "-" ] && REPLY_VAL=""
+    EXTRA_ENFORCE="$REPLY_VAL"
+    CONF_ERRORS=""
+    if validate_extras; then break; fi
+    echo "  → ${CONF_ERRORS#  - }" >&2
+  done
+  echo
+
+  # --- 作業開始からの上限 ---
+  echo "【作業時間の上限】その日最初のログインから数えて、この長さで終了します（例: 8 / 7:30）"
+  echo "  時刻指定とは別に効きます。無しにするなら -"
+  while :; do
+    ask "  上限" "${WORK_LIMIT:--}"
+    [ "$REPLY_VAL" = "-" ] && REPLY_VAL=""
+    WORK_LIMIT="$REPLY_VAL"
+    if [ -z "$WORK_LIMIT" ] || [ -n "$(work_limit_min)" ]; then break; fi
+    echo "  → 時間（8）か 時間:分（7:30）で入力してください" >&2
+  done
+  echo
+
   # --- 導入後のモード ---
   # 本番で動いているものを設定変更だけで黙ってドライランへ戻さない。
   # 「効かなくなったことに気づけない」のがこのツールで一番まずい壊れ方。
@@ -862,7 +1290,7 @@ cmd_setup() {
   write_newsyslog || true
   if [ "$target_dry" = "1" ]; then touch "$DRYFLAG"; else rm -f "$DRYFLAG"; fi
   load_daemon || exit 1
-  if ! daemon_loaded; then
+  if ! daemon_loaded || ! tick_loaded; then
     echo "デーモンの登録を確認できませんでした（sudo $BIN status で確認してください）" >&2
     exit 1
   fi
@@ -871,7 +1299,7 @@ cmd_setup() {
   if [ "$target_dry" = "1" ]; then
     echo "導入しました（ドライラン中：まだ終了しません）"
   else
-    echo "導入しました（本番：次回 ${T_ARR[3]} に レベル ${LEVEL} で終了します）"
+    echo "導入しました（本番：$(enforce_list) に レベル ${LEVEL} で終了します）"
   fi
   ask "いま全段階を通しで確認しますか (y/n)" "y"
   if [ "$(lower "$REPLY_VAL")" = "y" ]; then
@@ -898,7 +1326,7 @@ cmd_install() {
   write_newsyslog || true
   [ "$fresh" = "1" ] && touch "$DRYFLAG"
   load_daemon || exit 1
-  if ! daemon_loaded; then
+  if ! daemon_loaded || ! tick_loaded; then
     echo "デーモンの登録を確認できませんでした（sudo $BIN status で確認してください）" >&2
     exit 1
   fi
@@ -928,11 +1356,16 @@ cmd_uninstall() {
   /bin/launchctl bootout system "$PLIST" 2>/dev/null \
     || /bin/launchctl bootout "system/${LABEL}" 2>/dev/null \
     || true
-  rm -f "$PLIST" "$BIN" "$DRYFLAG" "$BYPASS" "$NEWSYSLOG" "$TODAY_FILE"
+  /bin/launchctl bootout system "$TICK_PLIST" 2>/dev/null \
+    || /bin/launchctl bootout "system/${TICK_LABEL}" 2>/dev/null \
+    || true
+  rm -f "$PLIST" "$TICK_PLIST" "$BIN" "$DRYFLAG" "$BYPASS" "$NEWSYSLOG" "$TODAY_FILE" \
+        "$TIMER_FILE" "$WORKSTART_FILE"
 
-  if daemon_loaded; then
+  if daemon_loaded || tick_loaded; then
     echo "デーモンをまだ外せていません。次を実行してください:" >&2
-    echo "  sudo launchctl bootout system/${LABEL}" >&2
+    daemon_loaded && echo "  sudo launchctl bootout system/${LABEL}" >&2
+    tick_loaded && echo "  sudo launchctl bootout system/${TICK_LABEL}" >&2
     exit 1
   fi
   echo "削除しました（設定 $CONF とログ $LOG は残しています）。"
@@ -955,7 +1388,7 @@ cmd_today() {
         echo "今日の調整: なし（通常のスケジュールで動きます）"
       else
         echo "今日の調整: $summary"
-        echo "強制終了  : $(to_hhmm $(( $(to_min "${T_ARR[3]}") + TODAY_EXTEND )))"
+        echo "強制終了  : $(today_enforce_list)"
         echo "明日には自動的に元へ戻ります。"
       fi
       ;;
@@ -965,7 +1398,15 @@ cmd_today() {
         *" $value "*) ;;
         *) echo "延長できるのは $EXTEND_SLOTS 分のいずれかです（受け皿のトリガと対になっているため）" >&2; exit 1 ;;
       esac
-      write_today "$value" ""
+      local target="${3:-}"
+      read_today
+      if [ -z "$target" ]; then
+        target=$(next_session_hhmm) || {
+          echo "今日の強制終了（$(today_enforce_list)）はもう過ぎています。延ばす回がありません" >&2
+          exit 1
+        }
+      fi
+      write_today "$value" "$TODAY_LEVEL" "$target"
       ;;
 
     level)
@@ -974,7 +1415,9 @@ cmd_today() {
         *) echo "レベルは notify / soft / normal / hard のいずれかです" >&2; exit 1 ;;
       esac
       read_today
-      write_today "$TODAY_EXTEND" "$value"
+      local keep=""
+      [ "$TODAY_IDX" -ge 0 ] && keep=$(to_hhmm "${SES_3[$TODAY_IDX]}")
+      write_today "$TODAY_EXTEND" "$value" "$keep"
       ;;
 
     clear)
@@ -983,7 +1426,8 @@ cmd_today() {
       ;;
 
     *)
-      echo "usage: sudo $0 today [show|extend <分>|level <名前>|clear]" >&2
+      echo "usage: sudo $0 today [show|extend <分> [HH:MM]|level <名前>|clear]" >&2
+      echo "  extend の HH:MM はどの回を延ばすか。省くと次に来る回" >&2
       echo "  延長できる分数: $EXTEND_SLOTS" >&2
       exit 1 ;;
   esac
@@ -992,7 +1436,7 @@ cmd_today() {
 # 上書きファイルを書く。書いたあとに読み直して、受け付けられたことを確かめる。
 # 「書けた」と「効く」は別なので、書けただけで成功と言わない。
 write_today() {
-  local extend="${1:-0}" level="${2:-}" tmp
+  local extend="${1:-0}" level="${2:-}" target="${3:-}" tmp
   tmp="${TODAY_FILE}.new.$$"
   # 条件付きの出力を `[ … ] && echo` で書かないこと。グループの終了コードは
   # 最後の要素のものなので、条件が偽なだけで「書き込みに失敗した」と
@@ -1000,7 +1444,10 @@ write_today() {
   {
     echo "# enddayd が置いた当日限りの上書き。日付が変われば自動的に無効になる。"
     echo "DATE=$(date +%F)"
-    if [ "$extend" -gt 0 ] 2>/dev/null; then echo "EXTEND=${extend}"; fi
+    if [ "$extend" -gt 0 ] 2>/dev/null; then
+      echo "EXTEND=${extend}"
+      [ -n "$target" ] && echo "TARGET=${target}"
+    fi
     if [ -n "$level" ]; then echo "LEVEL=${level}"; fi
   } >"$tmp"
   if [ ! -s "$tmp" ]; then
@@ -1016,8 +1463,128 @@ write_today() {
     exit 1
   fi
   echo "今日の調整: $(today_summary)"
-  echo "強制終了  : $(to_hhmm $(( $(to_min "${T_ARR[3]}") + TODAY_EXTEND )))"
+  echo "強制終了  : $(today_enforce_list)"
   echo "明日には自動的に元へ戻ります。"
+}
+
+# いまの時刻（分）。テストでは ENDDAYD_FORCE_MIN で差し替える。
+now_min() {
+  if [ -n "${ENDDAYD_FORCE_MIN:-}" ]; then echo "$ENDDAYD_FORCE_MIN"
+  else echo $((10#$(date +%H) * 60 + 10#$(date +%M))); fi
+}
+
+# 次に来る回の強制終了（延長前の時刻）を HH:MM で返す。無ければ 1。
+# 延長済みの回は延長後の時刻で比べる。比べないと、延ばした回の受け皿を
+# 待っているあいだに「延長し直す」と次の回へ移ってしまい、延ばした回が
+# どこでも落ちなくなる。
+next_session_hhmm() {
+  local now i=0
+  now=$(now_min)
+  while [ "$i" -lt "$SES_N" ]; do
+    if [ "$(session_kill_min "$i")" -ge "$now" ]; then
+      to_hhmm "${SES_3[$i]}"; return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# ------------------------------------------------------------ タイマー ---
+#
+# 「今から N 分後に終了」。締切はエポック秒で持つので日をまたいでもよい。
+# 時刻指定の延長と違い、毎分起きる $TICK_LABEL が見るので任意の分数にできる。
+
+cmd_timer() {
+  need_root
+  require_valid_conf || exit 1
+  local action="${1:-show}" value="${2:-}"
+  # 「timer 25」は「timer start 25」と同じ
+  case "$action" in [0-9]*) value="$action"; action=start ;; esac
+
+  case "$action" in
+    show)
+      timer_status_line || echo "タイマー: なし"
+      ;;
+
+    start)
+      case "$value" in
+        ''|*[!0-9]*) echo "分数は 1〜${TIMER_MAX_MIN} の整数で指定してください" >&2; exit 1 ;;
+      esac
+      if [ "$((10#$value))" -lt 1 ] || [ "$((10#$value))" -gt "$TIMER_MAX_MIN" ]; then
+        echo "分数は 1〜${TIMER_MAX_MIN} の整数で指定してください" >&2; exit 1
+      fi
+      # 監視が動いていないのに置くと、書けただけで落ちない。書く前に断る。
+      if ! tick_loaded; then
+        echo "タイマー用のデーモン（${TICK_LABEL}）が登録されていません。sudo $BIN install で入れ直してください" >&2
+        exit 1
+      fi
+      local now deadline tmp replaced=""
+      now=$(date +%s)
+      deadline=$((now + 10#$value * 60))
+      [ -f "$TIMER_FILE" ] && replaced=$(timer_status_line)
+      tmp="${TIMER_FILE}.new.$$"
+      {
+        echo "# enddayd が置いたタイマー。取り消すなら sudo $BIN timer cancel"
+        echo "SET=$now"
+        echo "MINUTES=$((10#$value))"
+        echo "DEADLINE=$deadline"
+      } >"$tmp"
+      chmod 644 "$tmp" 2>/dev/null || true
+      if [ ! -s "$tmp" ] || ! mv "$tmp" "$TIMER_FILE"; then
+        rm -f "$tmp"; echo "$TIMER_FILE を書けませんでした" >&2; exit 1
+      fi
+      # 書けたことと読めることは別。tick と同じ読み方で読み直す。
+      if [ "$(kv_get "$TIMER_FILE" DEADLINE)" != "$deadline" ]; then
+        rm -f "$TIMER_FILE"; echo "$TIMER_FILE を読み直せませんでした（タイマーは置いていません）" >&2; exit 1
+      fi
+      read_today
+      [ -n "$replaced" ] && echo "前のタイマーを置き換えました（${replaced#タイマー: }）"
+      mark "タイマー: $(epoch_hhmm "$deadline") に終了します（$((10#$value))分後、レベル ${TODAY_LEVEL:-$LEVEL}）"
+      echo "  ${TIMER_NOTICE_MIN}分前に予告・${TIMER_WARN_MIN}分前に警告・${TIMER_FINAL_MIN}分前に最終通告"
+      echo "  取り消す: sudo $BIN timer cancel"
+      ;;
+
+    cancel|clear)
+      if [ -f "$TIMER_FILE" ]; then
+        rm -f "$TIMER_FILE"; echo "タイマーを取り消しました。"
+      else
+        echo "タイマーはありません。"
+      fi
+      ;;
+
+    *)
+      echo "usage: sudo $0 timer [show|<分>|start <分>|cancel]" >&2
+      exit 1 ;;
+  esac
+}
+
+# 動いているタイマーを1行で。無ければ 1。
+timer_status_line() {
+  [ -f "$TIMER_FILE" ] || return 1
+  local deadline now
+  deadline=$(kv_get "$TIMER_FILE" DEADLINE)
+  case "$deadline" in ''|*[!0-9]*) echo "タイマー: 読めません（${TIMER_FILE}）"; return 0 ;; esac
+  now=$(date +%s)
+  if [ "$deadline" -ge "$now" ]; then
+    echo "タイマー: $(epoch_hhmm "$deadline") に終了（あと $(( (deadline - now + 59) / 60 ))分）"
+  else
+    echo "タイマー: $(epoch_hhmm "$deadline") に終了（締切を過ぎています）"
+  fi
+}
+
+# 作業時間の上限を1行で。設定が無ければ 1。
+work_status_line() {
+  [ -n "$WORK_LIMIT" ] || return 1
+  local limit start stamp
+  limit=$(work_limit_min)
+  stamp=$(kv_get "$WORKSTART_FILE" DATE)
+  start=$(kv_get "$WORKSTART_FILE" START)
+  case "$start" in ''|*[!0-9]*) stamp="" ;; esac
+  if [ "$stamp" = "$(date +%F)" ] && [ -n "$limit" ]; then
+    echo "作業開始    : $(epoch_hhmm "$start")（上限 $(work_limit_label) → $(epoch_hhmm $((start + limit * 60))) に終了）"
+  else
+    echo "作業開始    : 今日はまだ記録がありません（ログイン中なら1分以内に記録されます）"
+  fi
 }
 
 cmd_dryrun() {
@@ -1026,8 +1593,9 @@ cmd_dryrun() {
     on)  touch "$DRYFLAG"; echo "ドライラン: ON（終了処理は実行しません）" ;;
     off) require_valid_conf || exit 1
          rm -f "$DRYFLAG"
-         echo "ドライラン: OFF（次回 ${T_ARR[3]} に レベル ${LEVEL} で終了します）"
-         daemon_loaded || echo "注意: デーモンが登録されていません。sudo $BIN install を実行してください" >&2 ;;
+         echo "ドライラン: OFF（$(enforce_list) に レベル ${LEVEL} で終了します）"
+         { daemon_loaded && tick_loaded; } \
+           || echo "注意: デーモンが登録されていません。sudo $BIN install を実行してください" >&2 ;;
     *)   echo "usage: sudo $0 dryrun on|off" >&2; exit 1 ;;
   esac
 }
@@ -1036,7 +1604,7 @@ cmd_config_body() {
   if [ -n "$CONF_ERRORS" ]; then
     echo "設定エラー  : 直すまで終業は実行されません"
     echo "$CONF_ERRORS"
-    echo "生の値      : TIMES=\"$TIMES\" WEEKDAYS=\"$WEEKDAYS\" LEVEL=\"$LEVEL\" KILL_GRACE=\"$KILL_GRACE\""
+    echo "生の値      : TIMES=\"$TIMES\" WEEKDAYS=\"$WEEKDAYS\" LEVEL=\"$LEVEL\" KILL_GRACE=\"$KILL_GRACE\" EXTRA_ENFORCE=\"$EXTRA_ENFORCE\" WORK_LIMIT=\"$WORK_LIMIT\""
     return 1
   fi
   local d names=""
@@ -1046,6 +1614,15 @@ cmd_config_body() {
   echo "警告        : ${T_ARR[1]}  （ログアウト試行: $([ "$LOGOUT_ATTEMPT" = 1 ] && echo あり || echo なし)）"
   echo "最終通告    : ${T_ARR[2]}"
   echo "強制終了    : ${T_ARR[3]}  （猶予 ${KILL_GRACE}分）"
+  if [ "$SES_N" -gt 1 ]; then
+    local m3 lead
+    m3=$(to_min "${T_ARR[3]}")
+    lead="$((m3 - $(to_min "${T_ARR[0]}")))分前に予告・$((m3 - $(to_min "${T_ARR[1]}")))分前に警告・$((m3 - $(to_min "${T_ARR[2]}")))分前に最終通告"
+    echo "強制終了の回: $(enforce_list)  （どの回も ${lead}）"
+  fi
+  if [ -n "$WORK_LIMIT" ]; then
+    echo "作業時間上限: $(work_limit_label)  （その日最初のログインから）"
+  fi
   echo "レベル      : $(level_label "$LEVEL")"
   echo "当日スキップ: $([ "$ALLOW_BYPASS" = 1 ] && echo 許可 || echo 不可)"
   if [ -n "${MODE_OVERRIDE:-}" ]; then
@@ -1070,6 +1647,14 @@ cmd_status() {
   else
     echo "デーモン    : 未登録"
   fi
+  # タイマー監視は 0.6 で足したもの。古い版から本体だけ差し替えると外れたままになる。
+  if tick_loaded; then
+    echo "タイマー監視: 登録済み"
+  else
+    echo "タイマー監視: 未登録（timer と WORK_LIMIT は効きません。sudo $BIN install で入ります）"
+  fi
+  timer_status_line | sed 's/^タイマー: /タイマー    : /'
+  work_status_line || true
   read_today
   local today_line
   today_line=$(today_summary)
@@ -1131,11 +1716,14 @@ case "${1:-}" in
   uninstall)  cmd_uninstall ;;
   config)     cmd_config ;;
   dryrun)     cmd_dryrun "${2:-}" ;;
-  today)      cmd_today "${2:-show}" "${3:-}" ;;
+  today)      cmd_today "${2:-show}" "${3:-}" "${4:-}" ;;
+  timer)      cmd_timer "${2:-show}" "${3:-}" ;;
+  tick)       cmd_tick ;;
   status)     cmd_status ;;
   rehearsal)  cmd_rehearsal "${2:-}" ;;
   stage)      cmd_stage "${2:-notice}" ;;
-  plist)      require_valid_conf || exit 1; gen_plist ;;
+  plist)      require_valid_conf || exit 1
+              if [ "${2:-}" = "tick" ]; then gen_tick_plist; else gen_plist; fi ;;
   log)        tail -f "$LOG" ;;
   *)
     usage

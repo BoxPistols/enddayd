@@ -595,7 +595,8 @@ EOF
 @test "today: an extension crossing midnight is refused" {
   write_conf_file 'TIMES="22:00,22:30,22:45,23:00"' 'WEEKDAYS="1,2,3,4,5,6,7"' \
                   'LEVEL="normal"' 'KILL_GRACE="10"'
-  run as_root bash "$SCRIPT" today extend 60
+  # 延ばす回は「次に来る回」なので、時計を朝に固定しておく
+  ENDDAYD_FORCE_MIN=600 run as_root bash "$SCRIPT" today extend 60
   [ "$status" -ne 0 ]
   contains "$output" "日をまた"
   [ ! -f "$SANDBOX/etc/today" ]   # 受け付けなかったものを残さない
@@ -852,4 +853,480 @@ EOF
   run as_root_installable bash "$SCRIPT" install
   [ "$status" -eq 0 ]
   [ -f "$SANDBOX/installed/enddayd.sh" ]
+}
+
+# --- 1日に複数回 ---------------------------------------------------------
+#
+# EXTRA_ENFORCE の各時刻は、TIMES と同じ間隔（既定 50分前・20分前・5分前）で
+# 予告・警告・最終通告を持つ。12:00 なら 11:10 / 11:40 / 11:55 / 12:00。
+
+conf_with_extra() {
+  write_conf_file \
+    'TIMES="18:00,18:30,18:45,18:50"' \
+    'WEEKDAYS="1,2,3,4,5,6,7"' \
+    'LEVEL="normal"' \
+    'LOGOUT_ATTEMPT="1"' \
+    'ALLOW_BYPASS="1"' \
+    'KILL_GRACE="10"' \
+    "EXTRA_ENFORCE=\"$1\""
+}
+
+# 追加の回にも4段階が付く
+@test "multi: an extra enforce time has all four stages" {
+  conf_with_extra "12:00,15:00"
+  run run_at 669;  contains "$output" "out of window"
+  run run_at 670;  contains "$output" "stage=notice"; contains "$output" "session=12:00"
+  run run_at 700;  contains "$output" "stage=warn"
+  run run_at 715;  contains "$output" "stage=final"
+  run run_at 720;  contains "$output" "stage=enforce"; contains "$output" "session=12:00"
+  run run_at 900;  contains "$output" "stage=enforce"; contains "$output" "session=15:00"
+}
+
+# 回の間は何もしない。猶予は回ごとに効く
+@test "multi: the gap between sessions is out of window" {
+  conf_with_extra "12:00"
+  run run_at 730; contains "$output" "stage=enforce"
+  run run_at 731; contains "$output" "out of window"
+  run run_at 1079; contains "$output" "out of window"
+}
+
+# もとの回（TIMES）はそのまま動く
+@test "multi: the main session keeps working" {
+  conf_with_extra "12:00"
+  run run_at 1080; contains "$output" "stage=notice"; contains "$output" "session=18:50"
+  run run_at 1130; contains "$output" "stage=enforce"; contains "$output" "session=18:50"
+}
+
+# 1回だけの設定ではログの形を変えない（既存のログを読む道具を壊さない）
+@test "multi: a single session log line has no session field" {
+  run run_at 1130
+  contains "$output" "stage=enforce level=normal user=testuser"
+  not_contains "$output" "session="
+}
+
+# 本番で追加の回でも実際に落ちる
+@test "multi: production enforce on an extra session invokes shutdown" {
+  conf_with_extra "12:00"
+  run run_at_live 720
+  contains "$(log_text)" "enforce reached"
+  contains "$(shutdown_calls)" "shutdown -h now"
+}
+
+# plist は回ごとに4段階と延長の受け皿を持つ
+@test "plist: has triggers for every session" {
+  write_conf_file 'TIMES="18:00,18:30,18:45,18:50"' 'WEEKDAYS="1"' \
+                  'LEVEL="normal"' 'KILL_GRACE="10"' 'EXTRA_ENFORCE="12:00"'
+  run bash "$SCRIPT" plist
+  count=$(echo "$output" | grep -c "<key>Weekday</key>")
+  [ "$count" -eq 16 ]   # 2回 × (4段階 + 受け皿4つ)
+  contains "$output" "<key>Hour</key><integer>11</integer><key>Minute</key><integer>10</integer>"
+  contains "$output" "<key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer>"
+}
+
+# 書式の誤りは断る
+@test "conf: rejects a malformed EXTRA_ENFORCE" {
+  conf_with_extra "12:00,3pm"
+  run run_at 720
+  [ "$status" -ne 0 ]
+  contains "$output" "config invalid"
+  contains "$output" "3pm"
+}
+
+# 回どうしが重なる設定は断る（どちらの回の段階か決められない）
+@test "conf: rejects sessions that overlap" {
+  conf_with_extra "18:30"
+  run run_at 1110
+  [ "$status" -ne 0 ]
+  contains "$output" "重なります"
+}
+
+# 同じ時刻を二度書いたものは断る
+@test "conf: rejects a duplicated enforce time" {
+  conf_with_extra "18:50"
+  run run_at 1130
+  [ "$status" -ne 0 ]
+  contains "$output" "重複"
+}
+
+# 予告が前日にはみ出す回は断る
+@test "conf: rejects a session whose notice starts before midnight" {
+  conf_with_extra "00:30"
+  run run_at 30
+  [ "$status" -ne 0 ]
+  contains "$output" "0:00 より前"
+}
+
+# config に回の一覧が出る
+@test "multi: config lists every session" {
+  conf_with_extra "12:00,15:00"
+  run bash "$SCRIPT" config
+  contains "$output" "12:00 / 15:00 / 18:50"
+  contains "$output" "50分前に予告"
+}
+
+# 延長は「次に来る回」に掛かる
+@test "multi: today extend applies to the next session" {
+  conf_with_extra "12:00"
+  ENDDAYD_FORCE_MIN=600 run as_root bash "$SCRIPT" today extend 60
+  [ "$status" -eq 0 ]
+  contains "$(cat "$SANDBOX/etc/today")" "TARGET=12:00"
+  contains "$output" "13:00 / 18:50"
+  run run_at 720;  contains "$output" "extended: enforce moved to 13:00"
+  run run_at 780;  contains "$output" "stage=enforce"
+  run run_at 1130; contains "$output" "stage=enforce"   # 夕方の回は動かない
+}
+
+# 回を名指しして延ばせる
+@test "multi: today extend accepts an explicit session" {
+  conf_with_extra "12:00"
+  ENDDAYD_FORCE_MIN=600 run as_root bash "$SCRIPT" today extend 30 18:50
+  [ "$status" -eq 0 ]
+  run run_at 720;  contains "$output" "stage=enforce"
+  run run_at 1130; contains "$output" "extended: enforce moved to 19:20"
+}
+
+# 今日に無い回は名指しできない
+@test "multi: today extend refuses an unknown session" {
+  conf_with_extra "12:00"
+  run as_root bash "$SCRIPT" today extend 30 13:00
+  [ "$status" -ne 0 ]
+  contains "$output" "13:00"
+  [ ! -f "$SANDBOX/etc/today" ]
+}
+
+# 延長中の回を待っているあいだに延ばし直しても、その回のまま。
+# 次の回へ移ると、延ばした回がどこでも落ちなくなる。
+@test "multi: re-extending keeps the session that is already extended" {
+  conf_with_extra "12:00"
+  write_today_file "DATE=$(date +%F)" "EXTEND=60" "TARGET=12:00"
+  ENDDAYD_FORCE_MIN=750 run as_root bash "$SCRIPT" today extend 90
+  [ "$status" -eq 0 ]
+  contains "$(cat "$SANDBOX/etc/today")" "TARGET=12:00"
+  contains "$(cat "$SANDBOX/etc/today")" "EXTEND=90"
+}
+
+# 次の回の予告に食い込む延長は断る
+@test "multi: an extension into the next session is refused" {
+  conf_with_extra "16:30"
+  ENDDAYD_FORCE_MIN=600 run as_root bash "$SCRIPT" today extend 120
+  [ "$status" -ne 0 ]
+  contains "$output" "次の回の予告"
+  [ ! -f "$SANDBOX/etc/today" ]
+}
+
+# 今日の回が全部終わっていれば、延ばす先が無いと言う
+@test "multi: today extend after the last session is refused" {
+  ENDDAYD_FORCE_MIN=1300 run as_root bash "$SCRIPT" today extend 30
+  [ "$status" -ne 0 ]
+  contains "$output" "もう過ぎています"
+}
+
+# レベルだけ変えても延長の対象は失われない
+@test "multi: a level override keeps the extension target" {
+  conf_with_extra "12:00"
+  write_today_file "DATE=$(date +%F)" "EXTEND=60" "TARGET=12:00"
+  run as_root bash "$SCRIPT" today level notify
+  [ "$status" -eq 0 ]
+  contains "$(cat "$SANDBOX/etc/today")" "TARGET=12:00"
+  contains "$(cat "$SANDBOX/etc/today")" "LEVEL=notify"
+}
+
+# --- タイマー（今から N 分） ---------------------------------------------
+#
+# 締切はエポック秒。毎分起きる tick が残りを見て段階を決める。
+# 予告 10分前・警告 5分前・最終通告 1分前・締切で強制終了。
+
+# 監視デーモンが無いのにタイマーを置かない（書けただけで落ちない状態を作らない）
+@test "timer: start is refused without the tick daemon" {
+  run as_root bash "$SCRIPT" timer 25
+  [ "$status" -ne 0 ]
+  contains "$output" "local.enddayd.tick"
+  [ ! -f "$SANDBOX/etc/timer" ]
+}
+
+@test "timer: start writes a deadline" {
+  mark_tick_loaded
+  local before
+  before=$(date +%s)
+  run as_root bash "$SCRIPT" timer 25
+  [ "$status" -eq 0 ]
+  contains "$output" "25分後"
+  local deadline
+  deadline=$(sed -n 's/^DEADLINE=//p' "$SANDBOX/etc/timer")
+  [ "$deadline" -ge $((before + 1500)) ]
+  [ "$deadline" -le $(( $(date +%s) + 1500 )) ]
+}
+
+@test "timer: start accepts the explicit start form" {
+  mark_tick_loaded
+  run as_root bash "$SCRIPT" timer start 5
+  [ "$status" -eq 0 ]
+  [ -f "$SANDBOX/etc/timer" ]
+}
+
+@test "timer: out of range values are refused" {
+  mark_tick_loaded
+  for v in 0 721 abc ""; do
+    run as_root bash "$SCRIPT" timer start "$v"
+    [ "$status" -ne 0 ]
+  done
+  [ ! -f "$SANDBOX/etc/timer" ]
+}
+
+@test "timer: cancel removes the timer" {
+  write_timer_in 600
+  run as_root bash "$SCRIPT" timer cancel
+  [ "$status" -eq 0 ]
+  [ ! -f "$SANDBOX/etc/timer" ]
+}
+
+@test "timer: show reports the remaining time" {
+  write_timer_in 1500
+  run as_root bash "$SCRIPT" timer
+  contains "$output" "あと 25分"
+  run bash "$SCRIPT" status
+  contains "$output" "あと 25分"
+}
+
+# 締切が遠ければ何もしない。毎分呼ばれるのでログにも書かない
+@test "tick: does nothing while the deadline is far" {
+  write_timer_in 3600
+  run tick_dry
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ -z "$(log_text)" ]
+}
+
+# 何も設定していなければ黙って終わる
+@test "tick: stays silent without a timer or a work limit" {
+  run tick_dry
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ -z "$(stderr_text)" ]
+}
+
+@test "tick: shows each countdown stage once" {
+  write_timer_in 540
+  run tick_dry
+  contains "$output" "timer stage=notice"
+  run tick_dry
+  not_contains "$output" "timer stage"     # 同じ段階を毎分出さない
+  write_timer_in 240 "STAGE=notice"
+  run tick_dry
+  contains "$output" "timer stage=warn"
+  write_timer_in 30 "STAGE=warn"
+  run tick_dry
+  contains "$output" "timer stage=final"
+}
+
+# 短いタイマーは届かない段階を飛ばして始まる
+@test "tick: a short timer starts at the stage it is in" {
+  write_timer_in 180
+  run tick_dry
+  contains "$output" "timer stage=warn"
+  not_contains "$output" "stage=notice"
+}
+
+@test "tick: the deadline enforces and clears the timer" {
+  write_timer_in -30 "STAGE=final"
+  run tick_dry
+  contains "$output" "timer stage=enforce"
+  contains "$output" "would execute level=normal"
+  [ ! -f "$SANDBOX/etc/timer" ]
+}
+
+# 本番では実際に落とす。落とす前に消すので、再起動後にもう一度落ちない
+@test "tick: production timer invokes shutdown after clearing itself" {
+  write_timer_in -10
+  run tick_live
+  contains "$(log_text)" "enforce reached level=normal"
+  contains "$(shutdown_calls)" "shutdown -h now"
+  [ ! -f "$SANDBOX/etc/timer" ]
+}
+
+# 猶予を過ぎて起きたら落とさない（時刻指定と同じ）。理由は残す
+@test "tick: a timer past the grace window is dropped with a reason" {
+  write_timer_in -660
+  run tick_dry
+  contains "$output" "timer missed"
+  not_contains "$output" "stage=enforce"
+  [ ! -f "$SANDBOX/etc/timer" ]
+}
+
+# 自分で押したタイマーは当日スキップや曜日では止まらない
+@test "tick: a manual timer ignores the weekday and the skip file" {
+  local other=$(( $(date +%u) % 7 + 1 ))
+  write_conf_file 'TIMES="18:00,18:30,18:45,18:50"' "WEEKDAYS=\"$other\"" \
+                  'LEVEL="normal"' 'ALLOW_BYPASS="1"' 'KILL_GRACE="10"'
+  date +%F >"$SANDBOX/etc/skip"
+  write_timer_in -10
+  run tick_dry
+  contains "$output" "timer stage=enforce"
+}
+
+@test "tick: the today level override applies to a timer" {
+  write_today_file "DATE=$(date +%F)" "LEVEL=notify"
+  write_timer_in -10
+  run tick_dry
+  contains "$output" "level=notify"
+}
+
+@test "tick: a broken timer file is ignored with a reason" {
+  printf 'DEADLINE=soon\n' >"$SANDBOX/etc/timer"
+  run tick_dry
+  contains "$output" "timer ignored"
+  [ ! -f "$SANDBOX/etc/timer" ]
+}
+
+# 設定が壊れていれば tick は何もしない。知らせるのは run の役目で、
+# 毎分アラートを出すと直す操作すらできなくなる
+@test "tick: a broken config does nothing" {
+  write_conf_file 'TIMES="18:00"' 'WEEKDAYS="1,2,3,4,5,6,7"' 'LEVEL="normal"'
+  write_timer_in -10
+  run tick_dry
+  [ "$status" -eq 0 ]
+  not_contains "$output" "stage="
+}
+
+# --- 作業開始から N 時間 -------------------------------------------------
+
+conf_with_work_limit() {
+  write_conf_file \
+    'TIMES="18:00,18:30,18:45,18:50"' \
+    "WEEKDAYS=\"${2:-1,2,3,4,5,6,7}\"" \
+    'LEVEL="normal"' \
+    'ALLOW_BYPASS="1"' \
+    'KILL_GRACE="10"' \
+    "WORK_LIMIT=\"$1\""
+}
+
+@test "work: the first tick of the day records the start" {
+  conf_with_work_limit "8"
+  run tick_dry
+  contains "$output" "work start"
+  contains "$(cat "$SANDBOX/etc/workstart")" "DATE=$(date +%F)"
+}
+
+# 開始は巻き戻らない（再起動で延ばせない）
+@test "work: a later tick keeps the recorded start" {
+  conf_with_work_limit "8"
+  write_workstart_ago 3600
+  local before
+  before=$(sed -n 's/^START=//p' "$SANDBOX/etc/workstart")
+  run tick_dry
+  not_contains "$output" "work start"
+  [ "$(sed -n 's/^START=//p' "$SANDBOX/etc/workstart")" = "$before" ]
+}
+
+@test "work: yesterday's start is replaced" {
+  conf_with_work_limit "8"
+  printf 'DATE=2000-01-01\nSTART=1\nSTAGE=enforce\n' >"$SANDBOX/etc/workstart"
+  run tick_dry
+  contains "$output" "work start"
+  not_contains "$(cat "$SANDBOX/etc/workstart")" "STAGE=enforce"
+}
+
+@test "work: warns close to the limit" {
+  conf_with_work_limit "7:30"
+  write_workstart_ago $(( 450 * 60 - 240 ))
+  run tick_dry
+  contains "$output" "work limit stage=warn"
+}
+
+# 上限で落とし、同じ日は二度落とさない
+@test "work: enforces once at the limit" {
+  conf_with_work_limit "8"
+  write_workstart_ago $(( 480 * 60 + 30 ))
+  run tick_dry
+  contains "$output" "work limit stage=enforce"
+  run tick_dry
+  not_contains "$output" "stage="
+}
+
+@test "work: production limit invokes shutdown" {
+  conf_with_work_limit "8"
+  write_workstart_ago $(( 480 * 60 + 30 ))
+  run tick_live
+  contains "$(log_text)" "enforce reached"
+  contains "$(shutdown_calls)" "shutdown -h now"
+  contains "$(cat "$SANDBOX/etc/workstart")" "STAGE=enforce"
+}
+
+@test "work: an unscheduled weekday does nothing" {
+  conf_with_work_limit "8" "$(( $(date +%u) % 7 + 1 ))"
+  write_workstart_ago $(( 480 * 60 + 30 ))
+  run tick_dry
+  [ -z "$output" ]
+}
+
+@test "work: the skip file stops the work limit" {
+  conf_with_work_limit "8"
+  date +%F >"$SANDBOX/etc/skip"
+  write_workstart_ago $(( 480 * 60 + 30 ))
+  run tick_dry
+  not_contains "$output" "stage="
+}
+
+@test "conf: rejects a malformed WORK_LIMIT" {
+  local v
+  for v in abc 0 24:00 7:5 100; do
+    conf_with_work_limit "$v"
+    run run_at 1130
+    [ "$status" -ne 0 ]
+    contains "$output" "WORK_LIMIT"
+  done
+}
+
+@test "conf: accepts hours and hours with minutes as WORK_LIMIT" {
+  local v
+  for v in 8 7:30 0:45; do
+    conf_with_work_limit "$v"
+    run run_at 1130
+    contains "$output" "stage=enforce"
+  done
+}
+
+@test "work: status shows the recorded start" {
+  conf_with_work_limit "8"
+  write_workstart_ago 3600
+  run bash "$SCRIPT" status
+  contains "$output" "作業開始"
+  contains "$output" "上限 8時間"
+}
+
+# --- タイマー監視の導入 ---------------------------------------------------
+
+@test "install: registers the tick daemon too" {
+  run as_root_installable bash "$SCRIPT" install
+  [ "$status" -eq 0 ]
+  [ -f "$SANDBOX/installed/local.enddayd.tick.plist" ]
+  [ -f "$SANDBOX/loaded.local.enddayd.tick" ]
+  [ -f "$SANDBOX/loaded.local.enddayd" ]
+}
+
+@test "plist: the tick plist runs every minute" {
+  run bash "$SCRIPT" plist tick
+  [ "$status" -eq 0 ]
+  contains "$output" "<string>tick</string>"
+  contains "$output" "<key>StartInterval</key>"
+  contains "$output" "<integer>60</integer>"
+  contains "$output" "local.enddayd.tick"
+}
+
+@test "uninstall: removes the tick daemon and the timer state" {
+  as_root_installable bash "$SCRIPT" install
+  write_timer_in 600
+  write_workstart_ago 60
+  run as_root bash "$SCRIPT" uninstall
+  [ "$status" -eq 0 ]
+  [ ! -f "$SANDBOX/installed/local.enddayd.tick.plist" ]
+  [ ! -f "$SANDBOX/loaded.local.enddayd.tick" ]
+  [ ! -f "$SANDBOX/etc/timer" ]
+  [ ! -f "$SANDBOX/etc/workstart" ]
+}
+
+# 古い版から本体だけ差し替えた状態（監視が未登録）を status で見分けられる
+@test "status: reports a missing tick daemon" {
+  run bash "$SCRIPT" status
+  contains "$output" "タイマー監視: 未登録"
 }
