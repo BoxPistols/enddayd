@@ -13,6 +13,18 @@ enum TodayOverrideTests {
         レベル(&t)
         受け付けられる延長(&t)
         表示(&t)
+        回の指定(&t)
+    }
+
+    // 1日に複数回あるとき、どの回を延ばすか
+    private static func 回の指定(_ t: inout Harness) {
+        let text = "DATE=2026-08-16\nEXTEND=60\nTARGET=12:00\n"
+        t.equal(TodayOverrideParser.parse(text, today: "2026-08-16").target, "12:00", "the extended session is read")
+        t.equal(TodayOverrideParser.parse("DATE=2026-08-16\nEXTEND=60\n", today: "2026-08-16").target, nil,
+                "an old override has no target")
+        // 次の回の予告（15:00 の回なら 14:10 = 850）に食い込む延長は出さない
+        t.equal(TodayOverrideParser.allowedSlots(lastEnforce: "12:00", killGrace: 10, nextNotice: 850),
+                [30, 60, 90], "slots running into the next notice are not offered")
     }
 
     private static func 日付印(_ t: inout Harness) {

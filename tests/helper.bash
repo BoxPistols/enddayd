@@ -26,16 +26,29 @@ EOF
 #!/bin/bash
 if [ "${1:-}" = "-u" ]; then echo 501; else echo 0; fi
 EOF
-  # 登録状態を持つ。print が常に失敗する固定スタブだと、bootstrap まで
+  # 登録状態をラベルごとに持つ。print が常に失敗する固定スタブだと、bootstrap まで
   # 進んだかどうかを見分けられず「登録を確認できませんでした」で終わる。
+  # 本体（local.enddayd）とタイマー監視（local.enddayd.tick）の2つがあるので、
+  # 片方を外しただけでもう片方まで外れたように見えてはいけない。
+  #   bootstrap system <plist> / bootout system <plist> → plist のファイル名がラベル
+  #   bootout system/<label> / print system/<label>
   cat >"$SANDBOX/bin/launchctl" <<EOF
 #!/bin/bash
 # asuser <uid> <cmd...> のみ通す
 if [ "\${1:-}" = "asuser" ]; then shift 2; exec "\$@"; fi
+label_of() {
+  case "\$1" in
+    system/*) echo "\${1#system/}" ;;
+    *.plist)  basename "\$1" .plist ;;
+    *)        echo "\$1" ;;
+  esac
+}
+target="\${3:-\${2:-}}"
 case "\${1:-}" in
-  bootstrap) : >"$SANDBOX/daemon.loaded" ;;
-  bootout)   rm -f "$SANDBOX/daemon.loaded" ;;
-  print)     [ -f "$SANDBOX/daemon.loaded" ] || exit 1 ;;
+  bootstrap) : >"$SANDBOX/loaded.\$(label_of "\$target")" ;;
+  bootout)   [ -f "$SANDBOX/loaded.\$(label_of "\$target")" ] || exit 1
+             rm -f "$SANDBOX/loaded.\$(label_of "\$target")" ;;
+  print)     [ -f "$SANDBOX/loaded.\$(label_of "\$target")" ] || exit 1 ;;
 esac
 exit 0
 EOF
@@ -50,6 +63,12 @@ case "$*" in
   *"application process"*) echo "iTerm2, Chrome" ;;
 esac
 exit 0
+EOF
+  # 最後の操作からの時間。既定は 5 秒前（いま操作している）。
+  # ENDDAYD_TEST_IDLE_NS で差し替える（ナノ秒）。
+  cat >"$SANDBOX/bin/ioreg" <<'EOF'
+#!/bin/bash
+echo "    | |   \"HIDIdleTime\" = ${ENDDAYD_TEST_IDLE_NS:-5000000000}"
 EOF
   cat >"$SANDBOX/bin/afplay" <<'EOF'
 #!/bin/bash
@@ -73,9 +92,13 @@ EOF
     -e "s#/usr/bin/sudo#$SANDBOX/bin/sudo#g" \
     -e "s#/usr/bin/osascript#$SANDBOX/bin/osascript#g" \
     -e "s#/usr/bin/afplay#$SANDBOX/bin/afplay#g" \
+    -e "s#/usr/sbin/ioreg#$SANDBOX/bin/ioreg#g" \
     -e "s#/sbin/shutdown#$SANDBOX/bin/shutdown#g" \
     -e "s#^BIN=.*#BIN=$SANDBOX/installed/enddayd.sh#" \
     -e "s#^PLIST=.*#PLIST=$SANDBOX/installed/local.enddayd.plist#" \
+    -e "s#^TICK_PLIST=.*#TICK_PLIST=$SANDBOX/installed/local.enddayd.tick.plist#" \
+    -e "s#^TIMER_FILE=.*#TIMER_FILE=$SANDBOX/etc/timer#" \
+    -e "s#^WORKSTART_FILE=.*#WORKSTART_FILE=$SANDBOX/etc/workstart#" \
     -e "s#^LOG=.*#LOG=$SANDBOX/enddayd.log#" \
     -e "s#^ERRLOG=.*#ERRLOG=$SANDBOX/enddayd.err.log#" \
     -e "s#^BYPASS=.*#BYPASS=$SANDBOX/etc/skip#" \
@@ -230,3 +253,24 @@ EOF
 
 # 今日だけの調整ファイルを置く
 write_today_file() { printf '%s\n' "$@" >"$SANDBOX/etc/today"; }
+
+# タイマー監視が登録済みの状態を作る（timer start は未登録だと断る）
+mark_tick_loaded() { : >"$SANDBOX/loaded.local.enddayd.tick"; }
+
+# tick を1回走らせる（ドライラン）。締切は実時刻との差で見るので、
+# タイマーや作業開始のファイルは「いまから何秒」で書いて渡す。
+tick_dry() { ENDDAYD_DRY_RUN=1 bash "$SCRIPT" tick 2>"$SANDBOX/stderr"; }
+tick_live() { bash "$SCRIPT" tick 2>"$SANDBOX/stderr"; }
+
+# タイマーファイルを「締切まであと N 秒」で置く（負なら過ぎている）。
+# 2つ目以降の引数はそのまま行として足す（STAGE=warn など）。
+write_timer_in() {
+  local sec="$1"; shift
+  printf '%s\n' "SET=$(date +%s)" "MINUTES=1" "DEADLINE=$(( $(date +%s) + sec ))" "$@" \
+    >"$SANDBOX/etc/timer"
+}
+
+# 作業開始を「N 秒前」として記録する
+write_workstart_ago() {
+  printf '%s\n' "DATE=$(date +%F)" "START=$(( $(date +%s) - $1 ))" >"$SANDBOX/etc/workstart"
+}

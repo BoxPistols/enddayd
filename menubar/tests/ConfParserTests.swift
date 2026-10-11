@@ -26,6 +26,38 @@ enum ConfParserTests {
         真偽値(&t)
         書式(&t)
         猶予の警告(&t)
+        追加の回(&t)
+        作業時間の上限(&t)
+    }
+
+    // 1日に複数回。規則は enddayd.sh の validate_extras と同じ
+    private static func 追加の回(_ t: inout Harness) {
+        let ok = ConfParser.parse(valid + "\nEXTRA_ENFORCE=\"12:00,15:00\"")
+        t.expect(!ok.isBroken, "extra enforce times are accepted", ok.problems.joined(separator: " / "))
+        t.equal(ConfParser.sessions(ok).map(\.enforce), [720, 900, 1130], "sessions are sorted by enforce time")
+        t.equal(ConfParser.sessions(ok).first?.notice, 670, "an extra session borrows the lead of TIMES")
+
+        // 空は「無し」。壊れた扱いにしない
+        t.expect(!ConfParser.parse(valid + "\nEXTRA_ENFORCE=\"\"").isBroken, "an empty EXTRA_ENFORCE is fine")
+
+        t.expect(ConfParser.parse(valid + "\nEXTRA_ENFORCE=\"3pm\"").isBroken, "a malformed extra time is refused")
+        t.expect(ConfParser.parse(valid + "\nEXTRA_ENFORCE=\"18:30\"").isBroken, "overlapping sessions are refused")
+        t.expect(ConfParser.parse(valid + "\nEXTRA_ENFORCE=\"18:50\"").isBroken, "a duplicated enforce time is refused")
+        t.expect(ConfParser.parse(valid + "\nEXTRA_ENFORCE=\"00:30\"").isBroken,
+                 "a session whose notice starts before midnight is refused")
+
+        // 猶予の警告はその日最後の回で見る
+        let late = ConfParser.parse(valid + "\nEXTRA_ENFORCE=\"23:55\"")
+        t.equal(ConfParser.warnings(for: late).count, 1, "the grace warning follows the last session")
+    }
+
+    private static func 作業時間の上限(_ t: inout Harness) {
+        t.equal(ConfParser.workLimitMinutes("8"), 480, "WORK_LIMIT in hours")
+        t.equal(ConfParser.workLimitMinutes("7:30"), 450, "WORK_LIMIT in hours and minutes")
+        t.equal(ConfParser.workLimitMinutes("7:5"), nil, "WORK_LIMIT minutes need two digits")
+        t.equal(ConfParser.workLimitMinutes("24:00"), nil, "WORK_LIMIT stays within a day")
+        t.equal(ConfParser.workLimitMinutes("0"), nil, "WORK_LIMIT of zero is refused")
+        t.expect(ConfParser.parse(valid + "\nWORK_LIMIT=\"abc\"").isBroken, "a malformed WORK_LIMIT breaks the conf")
     }
 
     // 妥当な設定はそのまま読める

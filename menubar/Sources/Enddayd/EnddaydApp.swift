@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct EnddaydApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = DaemonModel()
+    @AppStorage("iconTint") private var tint: IconTint = .gold
 
     var body: some Scene {
         MenuBarExtra {
@@ -27,7 +28,13 @@ struct EnddaydApp: App {
                 .environmentObject(model)
         } label: {
             // メニューバーに常駐する本体。テキストは状態に追従する
-            Image(systemName: model.symbolName)
+            // 色を付けるのは動いている状態だけ（IconTint の説明を参照）
+            if let image = MenuBarIcon.image(symbol: model.symbolName,
+                                             color: model.symbolIsActive ? tint.color : nil) {
+                Image(nsImage: image)
+            } else {
+                Image(systemName: model.symbolName)
+            }
             if !model.barText.isEmpty {
                 Text(model.barText)
             }

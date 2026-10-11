@@ -2,8 +2,10 @@
 //
 //   swift make-icon.swift out.png [size]
 //
-// 図像は「日没の空に立つ電源記号」。終業（日が落ちる）と電源を切ることの
-// 両方を1つの形にしている。16pt でも潰れないよう、要素は3つに絞ってある。
+// 図像は「無地の地に電源記号」だけ。以前は日没の空を背にしていたが、太陽や
+// 月、空の色を持ち込むと天気や日の入り時刻のアプリに見えてしまうので外した。
+// 地は色味の無い黒鉄色にして、記号は金色にする。金色は「終業後の時間＝
+// ゴールデンタイム」の意味で、メニューバーの既定の色とも揃えてある。
 
 import Foundation
 import CoreGraphics
@@ -22,13 +24,10 @@ func rgb(_ r: Double, _ g: Double, _ b: Double, _ a: Double = 1) -> CGColor {
     CGColor(srgbRed: r / 255, green: g / 255, blue: b / 255, alpha: a)
 }
 
-// 記事・マニュアルと同じ色域（夜の紺 → 日没の琥珀）
-let skyTop    = rgb(14, 18, 28)
-let skyMid    = rgb(32, 42, 66)
-let skyLow    = rgb(120, 74, 62)
-let ember     = rgb(226, 138, 60)
-let emberLite = rgb(247, 194, 124)
-let ground    = rgb(10, 13, 20)
+// 地は色味の無いグレー。空を連想させる青や、地平線・光の帯は使わない
+let baseTop    = rgb(58, 58, 62)
+let baseBottom = rgb(24, 24, 27)
+let symbol     = rgb(242, 194, 79)   // 金色（メニューバーの暗い側と同じ）
 
 let scale = Double(size) / 1024.0
 let S = Double(size)
@@ -53,41 +52,25 @@ ctx.saveGState()
 ctx.addPath(bodyPath)
 ctx.clip()
 
-// 空のグラデーション
-let sky = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
-                     colors: [skyTop, skyMid, skyLow] as CFArray,
-                     locations: [0.0, 0.55, 1.0])!
-ctx.drawLinearGradient(sky,
+// 上から下へわずかに暗くなるだけの地
+let base = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
+                      colors: [baseTop, baseBottom] as CFArray,
+                      locations: [0.0, 1.0])!
+ctx.drawLinearGradient(base,
                        start: CGPoint(x: 0, y: bodyRect.maxY),
                        end: CGPoint(x: 0, y: bodyRect.minY),
                        options: [])
 
-// 地平線より下は暗く落とす
-let horizonY = bodyRect.minY + body * 0.24
-ctx.setFillColor(ground)
-ctx.fill(CGRect(x: bodyRect.minX, y: bodyRect.minY, width: body, height: horizonY - bodyRect.minY))
-
-// 地平線のきわに光の帯
-let glow = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
-                      colors: [ember.copy(alpha: 0.0)!, emberLite.copy(alpha: 0.85)!] as CFArray,
-                      locations: [0.0, 1.0])!
-ctx.saveGState()
-ctx.clip(to: CGRect(x: bodyRect.minX, y: horizonY, width: body, height: body * 0.15))
-ctx.drawLinearGradient(glow,
-                       start: CGPoint(x: 0, y: horizonY + body * 0.15),
-                       end: CGPoint(x: 0, y: horizonY),
-                       options: [])
-ctx.restoreGState()
-
-// --- 電源記号（琥珀色）---
+// --- 電源記号（中央）---
+// 縦棒がリングの上へ突き出すぶん、見た目の重心が上に寄るので少し下げる
 let cx = bodyRect.midX
-let cy = bodyRect.minY + body * 0.60
-let ringR = body * 0.215
-let lineW = body * 0.088
+let cy = bodyRect.midY - body * 0.03
+let ringR = body * 0.25
+let lineW = body * 0.095
 
 ctx.setLineCap(.round)
 ctx.setLineWidth(lineW)
-ctx.setStrokeColor(emberLite)
+ctx.setStrokeColor(symbol)
 
 // 上を 60 度あけたリング
 let gap = 30.0 * .pi / 180.0
