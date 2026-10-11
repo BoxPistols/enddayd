@@ -200,6 +200,11 @@ final class DaemonModel: ObservableObject {
         return "power"
     }
 
+    /// 動いている状態の記号か。メニューバーで色を付けるのはこれだけ。
+    var symbolIsActive: Bool {
+        symbolName == "power" || symbolName == "timer"
+    }
+
     /// 1時間以内に来るタイマーの締切。メニューバーに残りを出す対象。
     var timerDueSoon: Date? {
         guard let deadline = timerDeadline, deadline.timeIntervalSinceNow < 60 * 60 else { return nil }

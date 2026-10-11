@@ -4,7 +4,8 @@
 //
 // 図像は「無地の地に電源記号」だけ。以前は日没の空を背にしていたが、太陽や
 // 月、空の色を持ち込むと天気や日の入り時刻のアプリに見えてしまうので外した。
-// 地は色味の無い黒鉄色にして、何のアプリかは記号だけで伝える。
+// 地は色味の無い黒鉄色にして、記号は金色にする。金色は「終業後の時間＝
+// ゴールデンタイム」の意味で、メニューバーの既定の色とも揃えてある。
 
 import Foundation
 import CoreGraphics
@@ -23,10 +24,10 @@ func rgb(_ r: Double, _ g: Double, _ b: Double, _ a: Double = 1) -> CGColor {
     CGColor(srgbRed: r / 255, green: g / 255, blue: b / 255, alpha: a)
 }
 
-// 色味の無いグレー。空や夕焼けを連想させる青・琥珀は使わない
+// 地は色味の無いグレー。空を連想させる青や、地平線・光の帯は使わない
 let baseTop    = rgb(58, 58, 62)
 let baseBottom = rgb(24, 24, 27)
-let symbol     = rgb(242, 242, 245)
+let symbol     = rgb(242, 194, 79)   // 金色（メニューバーの暗い側と同じ）
 
 let scale = Double(size) / 1024.0
 let S = Double(size)

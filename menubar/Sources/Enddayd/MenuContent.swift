@@ -4,6 +4,7 @@ import AppKit
 struct MenuContent: View {
     @EnvironmentObject var model: DaemonModel
     @Environment(\.openWindow) private var openWindow
+    @AppStorage("iconTint") private var tint: IconTint = .gold
 
     var body: some View {
         Group {
@@ -157,6 +158,13 @@ struct MenuContent: View {
             // 出口が無いと古いまま動き続けるので、違いが出たら導線を出す。
             Button("本体を入れ直す…") { confirmReinstall() }
                 .disabled(model.busy)
+        }
+
+        // 見た目の好みなので、デーモンの設定とは別にこのアプリの中だけで持つ
+        Picker("アイコンの色", selection: $tint) {
+            ForEach(IconTint.allCases) { option in
+                Text(option.label).tag(option)
+            }
         }
 
         Toggle("ログイン時に起動", isOn: Binding(
