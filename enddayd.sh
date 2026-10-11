@@ -781,6 +781,7 @@ kv_set() {
 
 # エポック秒を HH:MM に。BSD（macOS）は -r、GNU は -d @ と書き方が違う。
 epoch_hhmm() { date -r "$1" +%H:%M 2>/dev/null || date -d "@$1" +%H:%M; }
+epoch_date() { date -r "$1" +%F 2>/dev/null || date -d "@$1" +%F; }
 
 # 最後のキーボード・マウス操作からの秒数。取れなければ空。
 # /dev/console の持ち主は画面ロック中もディスプレイのスリープ中もログイン中の
@@ -889,7 +890,11 @@ tick_work_limit() {
     idle=$(hid_idle_sec)
     case "$idle" in
       ''|*[!0-9]*) ;;
-      *) [ "$idle" -gt "$WORK_START_IDLE_MAX" ] && return 0 ;;
+      *)
+        [ "$idle" -gt "$WORK_START_IDLE_MAX" ] && return 0
+        # 00:01 に見て最後の操作が 23:59 なら、それは昨日の作業。今日の開始にしない
+        [ "$(epoch_date $((now - idle)))" = "$today" ] || return 0
+        ;;
     esac
     start="$now"
     {

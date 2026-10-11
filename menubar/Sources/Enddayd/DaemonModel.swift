@@ -239,17 +239,19 @@ final class DaemonModel: ObservableObject {
         weekdays.contains(Self.isoWeekday(of: Date()))
     }
 
-    /// 次に強制終了が来る日時（スキップ・ドライラン・延長は考慮しない素の予定）。
-    /// 1日に複数回あれば、その中でいちばん近いもの。
+    /// 次に強制終了が来る日時（スキップ・ドライランは考慮しない）。
+    /// 1日に複数回あれば、その中でいちばん近いもの。今日の分だけは
+    /// 「今日だけ延長」を含めた時刻で見る（延長は翌日には効かない）。
     func nextEnforceDate() -> Date? {
-        let enforces = sessions.map(\.enforce)
-        guard !enforces.isEmpty else { return nil }
+        let list = sessions
+        guard !list.isEmpty else { return nil }
         let cal = Calendar.current
         let now = Date()
         for offset in 0..<8 {
             guard let day = cal.date(byAdding: .day, value: offset, to: now) else { continue }
             guard weekdays.contains(Self.isoWeekday(of: day)) else { continue }
-            for at in enforces {
+            for session in list {
+                let at = offset == 0 ? killMinute(of: session) : session.enforce
                 var comps = cal.dateComponents([.year, .month, .day], from: day)
                 comps.hour = at / 60
                 comps.minute = at % 60
