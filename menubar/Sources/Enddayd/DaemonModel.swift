@@ -201,8 +201,10 @@ final class DaemonModel: ObservableObject {
     }
 
     /// 動いている状態の記号か。メニューバーで色を付けるのはこれだけ。
+    /// 今日がスキップ指定なら、その日は落ちないので色を付けない（タイマーは別）。
     var symbolIsActive: Bool {
-        symbolName == "power" || symbolName == "timer"
+        if symbolName == "timer" { return true }
+        return symbolName == "power" && !(skipToday && isScheduledToday)
     }
 
     /// 1時間以内に来るタイマーの締切。メニューバーに残りを出す対象。
