@@ -355,7 +355,8 @@ final class DaemonModel: ObservableObject {
     /// 設定を書いて reload する。値はこのアプリ側で検証済みであること。
     /// デーモン側の reload も同じ検証を持つので、二重で守られる。
     func saveConfig(times newTimes: [String], weekdays newDays: Set<Int>,
-                    level newLevel: EnforceLevel, logout: Bool, bypass: Bool, grace: Int) {
+                    level newLevel: EnforceLevel, logout: Bool, bypass: Bool, grace: Int,
+                    extraEnforce newExtra: [String]) {
         let sorted = newDays.sorted().map(String.init).joined(separator: ",")
         let lines = [
             "# enddayd 設定ファイル。手で編集したら sudo \(Self.binPath) reload を実行してください。",
@@ -366,9 +367,9 @@ final class DaemonModel: ObservableObject {
             "LOGOUT_ATTEMPT=\"\(logout ? 1 : 0)\"",
             "ALLOW_BYPASS=\"\(bypass ? 1 : 0)\"",
             "KILL_GRACE=\"\(grace)\"",
-            // この2つは画面ではまだ編集できない。いまの値をそのまま書き戻す。
+            "EXTRA_ENFORCE=\"\(newExtra.joined(separator: ","))\"",
+            // これは画面ではまだ編集できない。いまの値をそのまま書き戻す。
             // 書かなければ、時刻を直して保存しただけで黙って消える。
-            "EXTRA_ENFORCE=\"\(conf.extraEnforce.joined(separator: ","))\"",
             "WORK_LIMIT=\"\(conf.workLimit)\"",
         ]
         // 値の文字種は数字・コロン・カンマ・英小文字に限られるので printf で安全に書ける

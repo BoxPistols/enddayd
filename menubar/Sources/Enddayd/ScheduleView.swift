@@ -43,6 +43,17 @@ struct ScheduleView: View {
     @State private var logout = true
     @State private var bypass = true
     @State private var grace = 10
+    /// 画面に並べる回。基準の回（TIMES）と追加の回（EXTRA_ENFORCE）を、開いたときと
+    /// 回を足したときに早い順へ並べ直す。編集中に並べ直すと、時刻を動かしている
+    /// 最中にまとまりごと位置が飛ぶので、そのあいだは並びを保つ。
+    @State private var slots: [Slot] = []
+
+    private struct Slot: Identifiable {
+        let id = UUID()
+        /// 基準の回は4段階をstageDatesで持つ。追加の回は強制終了の時刻だけを持つ。
+        let isBase: Bool
+        var enforce: Date
+    }
     @State private var loaded = false
 
     private let stageLabels = ["予告（切り上げの合図）", "警告（実質の締切）", "最終通告", "強制終了"]
@@ -50,23 +61,24 @@ struct ScheduleView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
 
-            GroupBox("段階と時刻") {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(0..<4, id: \.self) { i in
-                        HStack {
-                            Text(stageLabels[i])
-                            Spacer()
-                            if stageDates.count == 4 {
-                                DatePicker("", selection: $stageDates[i], displayedComponents: .hourAndMinute)
-                                    .labelsHidden()
-                                    .frame(width: 90)
-                            }
-                        }
+            GroupBox("強制終了の回") {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(Array(slots.enumerated()), id: \.element.id) { n, slot in
+                        if n > 0 { Divider() }
+                        slotView(slot, number: n + 1)
+                    }
+                    HStack {
+                        Text("追加した回の予告・警告・最終通告は、基準の回と同じ間隔で前に付きます。")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Button("回を足す") { addSlot() }
                     }
                 }
                 .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-
             GroupBox("曜日") {
                 HStack(spacing: 6) {
                     ForEach(1...7, id: \.self) { d in
@@ -158,15 +170,99 @@ struct ScheduleView: View {
     private func loadFromModel() {
         guard !loaded else { return }
         loaded = true
-        stageDates = model.times.map { t in
-            let (h, m) = DaemonModel.parseTime(t) ?? (18, 0)
-            return Calendar.current.date(bySettingHour: h, minute: m, second: 0, of: Date()) ?? Date()
-        }
+        stageDates = model.times.map(dateOf)
+        slots = [Slot(isBase: true, enforce: Date())]
+            + model.extraEnforce.map { Slot(isBase: false, enforce: dateOf($0)) }
+        sortSlots()
         days = model.weekdays
         level = model.level
         logout = model.logoutAttempt
         bypass = model.allowBypass
         grace = model.killGrace
+    }
+
+    private func dateOf(_ t: String) -> Date {
+        let (h, m) = DaemonModel.parseTime(t) ?? (18, 0)
+        return Calendar.current.date(bySettingHour: h, minute: m, second: 0, of: Date()) ?? Date()
+    }
+
+    /// 回の見出しと中身。基準の回は4段階を選び、追加の回は強制終了だけを選ぶ。
+    @ViewBuilder
+    private func slotView(_ slot: Slot, number: Int) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(slot.isBase ? "\(number)回目（基準）" : "\(number)回目")
+                    .font(.headline)
+                Spacer()
+                if !slot.isBase {
+                    Button("削除") { slots.removeAll { $0.id == slot.id } }
+                }
+            }
+            if slot.isBase {
+                ForEach(0..<4, id: \.self) { i in
+                    HStack {
+                        Text(stageLabels[i])
+                        Spacer()
+                        if stageDates.count == 4 {
+                            DatePicker("", selection: $stageDates[i], displayedComponents: .hourAndMinute)
+                                .labelsHidden()
+                                .frame(width: 90)
+                        }
+                    }
+                }
+            } else {
+                HStack {
+                    Text(stageLabels[3])
+                    Spacer()
+                    DatePicker("", selection: enforceBinding(slot.id), displayedComponents: .hourAndMinute)
+                        .labelsHidden()
+                        .frame(width: 90)
+                }
+                Text(derivedStages(slot.enforce))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// 追加の回の予告・警告・最終通告。基準の回の間隔をそのまま前に付ける（デーモンと同じ計算）。
+    private func derivedStages(_ enforce: Date) -> String {
+        guard stageDates.count == 4 else { return "" }
+        let base = stageDates.map(DaemonModel.minuteOfDay)
+        let end = DaemonModel.minuteOfDay(enforce)
+        let names = ["予告", "警告", "最終通告"]
+        return (0..<3).map { i in
+            let m = end - (base[3] - base[i])
+            // 0:00より前にはみ出す設定はvalidationMessageが止める。ここでは見せ方だけ揃える
+            return m < 0 ? "\(names[i])前日" : "\(names[i])" + String(format: "%02d:%02d", m / 60, m % 60)
+        }.joined(separator: " / ")
+    }
+
+    /// 削除した直後、消えたまとまりのDatePickerが読みに来ることがあるので、idで引いて無ければ触らない。
+    private func enforceBinding(_ id: UUID) -> Binding<Date> {
+        Binding(
+            get: { slots.first { $0.id == id }?.enforce ?? Date() },
+            set: { v in
+                if let k = slots.firstIndex(where: { $0.id == id }) { slots[k].enforce = v }
+            }
+        )
+    }
+
+    private func enforceDate(_ slot: Slot) -> Date {
+        slot.isBase && stageDates.count == 4 ? stageDates[3] : slot.enforce
+    }
+
+    private func sortSlots() {
+        slots.sort { DaemonModel.minuteOfDay(enforceDate($0)) < DaemonModel.minuteOfDay(enforceDate($1)) }
+    }
+
+    /// 足した回の初期値。12:00から1時間ずつ、まだ使っていない時刻を探す。
+    /// 重なりの判定はvalidationMessageに任せる（ここで避けきる必要はない）。
+    private func addSlot() {
+        let used = Set(timeStrings + extraTimeStrings)
+        let hour = (12...23).first { !used.contains(String(format: "%02d:00", $0)) } ?? 12
+        slots.append(Slot(isBase: false, enforce: dateOf(String(format: "%02d:00", hour))))
+        sortSlots()
     }
 
     private func dayBinding(_ d: Int) -> Binding<Bool> {
@@ -178,11 +274,16 @@ struct ScheduleView: View {
         )
     }
 
-    private var timeStrings: [String] {
-        stageDates.map { d in
-            let c = Calendar.current.dateComponents([.hour, .minute], from: d)
-            return String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0)
-        }
+    private static func hhmm(_ d: Date) -> String {
+        let c = Calendar.current.dateComponents([.hour, .minute], from: d)
+        return String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0)
+    }
+
+    private var timeStrings: [String] { stageDates.map(Self.hhmm) }
+
+    /// 早い順。設定ファイルにもこの順で書く。
+    private var extraTimeStrings: [String] {
+        slots.filter { !$0.isBase }.map { Self.hhmm($0.enforce) }.sorted()
     }
 
     private var validationMessage: String? {
@@ -195,26 +296,33 @@ struct ScheduleView: View {
         for i in 1..<4 where mins[i] <= mins[i - 1] {
             return "時刻は早い順に並べてください（\(stageLabels[i]) が前の段階より早いか同時刻です）"
         }
-        return nil
+        // 回どうしの重なりはデーモンのreloadでも断られる。保存前に同じ規則で止める
+        return ConfParser.sessionProblem(provisionalState)
+    }
+
+    private var provisionalState: ConfState {
+        var state = ConfState()
+        state.times = timeStrings
+        state.weekdays = days
+        state.level = level
+        state.logoutAttempt = logout
+        state.allowBypass = bypass
+        state.killGrace = grace
+        state.extraEnforce = extraTimeStrings
+        return state
     }
 
     /// 保存を止めない注意書き。止めてしまうと、その日から強制終了ごと
     /// 効かなくなるほうが害が大きい。
     private var warningMessages: [String] {
         guard validationMessage == nil, stageDates.count == 4 else { return [] }
-        var provisional = ConfState()
-        provisional.times = timeStrings
-        provisional.weekdays = days
-        provisional.level = level
-        provisional.logoutAttempt = logout
-        provisional.allowBypass = bypass
-        provisional.killGrace = grace
-        return ConfParser.warnings(for: provisional)
+        return ConfParser.warnings(for: provisionalState)
     }
 
     private func save() {
         model.saveConfig(times: timeStrings, weekdays: days, level: level,
-                         logout: logout, bypass: bypass, grace: grace)
+                         logout: logout, bypass: bypass, grace: grace,
+                         extraEnforce: extraTimeStrings)
         dismiss()
     }
 }
