@@ -27,6 +27,7 @@ enum ConfParserTests {
         書式(&t)
         猶予の警告(&t)
         追加の回(&t)
+        足す回の初期値(&t)
         作業時間の上限(&t)
     }
 
@@ -49,6 +50,29 @@ enum ConfParserTests {
         // 猶予の警告はその日最後の回で見る
         let late = ConfParser.parse(valid + "\nEXTRA_ENFORCE=\"23:55\"")
         t.equal(ConfParser.warnings(for: late).count, 1, "the grace warning follows the last session")
+    }
+
+    // 回を足したときの初期値は、足しても重ならない時刻にする
+    private static func 足す回の初期値(_ t: inout Harness) {
+        var state = ConfParser.parse(valid)
+        var picked: [String] = []
+        for _ in 0..<4 {
+            guard let next = ConfParser.nextFreeEnforce(state) else { break }
+            picked.append(next)
+            state.extraEnforce.append(next)
+        }
+        t.equal(picked, ["12:00", "14:00", "16:00", "20:00"], "added sessions skip times that overlap")
+        t.expect(ConfParser.sessionProblem(state) == nil, "the picked sessions pass validation")
+
+        // 足し続けると、いずれ置ける場所が無くなってnilになる（ボタンを押せなくする）
+        var full = ConfParser.parse(valid.replacingOccurrences(of: "KILL_GRACE=\"10\"", with: "KILL_GRACE=\"120\""))
+        var rounds = 0
+        while let next = ConfParser.nextFreeEnforce(full), rounds < 24 {
+            full.extraEnforce.append(next)
+            rounds += 1
+        }
+        t.expect(rounds < 24 && ConfParser.sessionProblem(full) == nil,
+                 "no slot is offered once the day is full", "rounds=\(rounds) \(full.extraEnforce)")
     }
 
     private static func 作業時間の上限(_ t: inout Harness) {

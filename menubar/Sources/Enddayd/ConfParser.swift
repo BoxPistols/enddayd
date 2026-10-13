@@ -151,7 +151,7 @@ enum ConfParser {
     static func sessionProblem(_ state: ConfState) -> String? {
         let all = ([state.times[3]] + state.extraEnforce).compactMap(minutes(of:))
         if Set(all).count != all.count {
-            return "EXTRA_ENFORCE に他の強制終了と重複する時刻があります: \(state.extraEnforce.joined(separator: ","))"
+            return "強制終了の時刻が重複しています（EXTRA_ENFORCE=\(state.extraEnforce.joined(separator: ","))）"
         }
         let list = sessions(state)
         for (i, s) in list.enumerated() {
@@ -161,6 +161,18 @@ enum ConfParser {
             if i > 0, list[i - 1].enforce + state.killGrace >= s.notice {
                 return "\(hhmm(list[i - 1].enforce)) の猶予（\(state.killGrace)分）と \(hhmm(s.enforce)) の予告（\(hhmm(s.notice))）が重なります。間を空けてください"
             }
+        }
+        return nil
+    }
+
+    /// 回を足すときの初期値。12:00から1時間刻みで、足してもsessionProblemに
+    /// 掛からない最初の正時を返す（12〜23時のあと1〜11時）。無ければnil。
+    /// 文字列が重ならないだけで選ぶと、既定の設定では2回目から必ず猶予と予告が重なる。
+    static func nextFreeEnforce(_ state: ConfState) -> String? {
+        for hour in Array(12...23) + Array(1...11) {
+            var trial = state
+            trial.extraEnforce.append(String(format: "%02d:00", hour))
+            if sessionProblem(trial) == nil { return String(format: "%02d:00", hour) }
         }
         return nil
     }

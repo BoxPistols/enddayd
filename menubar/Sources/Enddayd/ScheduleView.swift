@@ -43,10 +43,17 @@ struct ScheduleView: View {
     @State private var logout = true
     @State private var bypass = true
     @State private var grace = 10
-    /// 画面に並べる回。基準の回（TIMES）と追加の回（EXTRA_ENFORCE）を、開いたときと
-    /// 回を足したときに早い順へ並べ直す。編集中に並べ直すと、時刻を動かしている
-    /// 最中にまとまりごと位置が飛ぶので、そのあいだは並びを保つ。
+    /// 画面に並べる回。基準の回（TIMES）と追加の回（EXTRA_ENFORCE）を、強制終了の
+    /// 早い順に並べる。番号をデーモンやメニューの回の順と揃えるため、時刻を動かして
+    /// 順が入れ替わったらその場で並べ直す。
     @State private var slots: [Slot] = []
+    /// 開いた時点の設定。開いているあいだに外で書き換えられたら保存を止める
+    /// （画面の値で上書きすると、外で足した回が黙って消える）。
+    @State private var loadedConf: ConfState?
+    /// 回の一覧の中身の高さ。一覧だけを高さの上限つきでスクロールさせるのに使う。
+    @State private var slotsHeight: CGFloat = 0
+    /// 一覧の高さの上限。回を足すたびに窓が伸びて、保存ボタンが画面の外に出ないようにする。
+    private let slotsMaxHeight: CGFloat = 380
 
     private struct Slot: Identifiable {
         let id = UUID()
@@ -61,19 +68,42 @@ struct ScheduleView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
 
+            // 設定ファイルが読めないと、読めなかった項目は既定値のまま画面に出る。
+            // そのまま保存すると手で書いた値が消えるので、理由を先に見せる
+            if !model.confProblems.isEmpty {
+                Text("設定ファイルに読めない値があります。保存すると画面の内容で書き直します: \(model.confProblems.joined(separator: " / "))")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             GroupBox("強制終了の回") {
                 VStack(alignment: .leading, spacing: 12) {
-                    ForEach(Array(slots.enumerated()), id: \.element.id) { n, slot in
-                        if n > 0 { Divider() }
-                        slotView(slot, number: n + 1)
+                    ScrollView(.vertical) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(Array(slots.enumerated()), id: \.element.id) { n, slot in
+                                if n > 0 { Divider() }
+                                slotView(slot, number: n + 1)
+                            }
+                        }
+                        .padding(.trailing, slotsHeight > slotsMaxHeight ? 12 : 0)
+                        .background(GeometryReader { g in
+                            Color.clear.preference(key: SlotsHeightKey.self, value: g.size.height)
+                        })
                     }
+                    .frame(height: min(slotsHeight, slotsMaxHeight))
+                    .onPreferenceChange(SlotsHeightKey.self) { slotsHeight = $0 }
+
+                    // 説明とボタンを同じ行に並べると説明が2行に折り返して潰れる（下の保存ボタンと同じ理由）
+                    Text("追加した回の予告・警告・最終通告は、基準の回と同じ間隔で前に付きます。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     HStack {
-                        Text("追加した回の予告・警告・最終通告は、基準の回と同じ間隔で前に付きます。")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
                         Spacer()
                         Button("回を足す") { addSlot() }
+                            .disabled(stageDates.count != 4 || ConfParser.nextFreeEnforce(provisionalState) == nil)
+                            .help("足しても他の回と重ならない時刻が入ります")
                     }
                 }
                 .padding(6)
@@ -160,6 +190,7 @@ struct ScheduleView: View {
         .padding(20)
         .frame(width: 460)
         .onAppear { loadFromModel() }
+        .onChange(of: stageDates) { sortSlots() }
         // 閉じたら読み込み済みの印を外す。外さないと、閉じているあいだに
         // 設定が変わっても次に開いたとき古い値のままになる。
         .onDisappear { loaded = false }
@@ -170,6 +201,7 @@ struct ScheduleView: View {
     private func loadFromModel() {
         guard !loaded else { return }
         loaded = true
+        loadedConf = model.conf
         stageDates = model.times.map(dateOf)
         slots = [Slot(isBase: true, enforce: Date())]
             + model.extraEnforce.map { Slot(isBase: false, enforce: dateOf($0)) }
@@ -196,6 +228,7 @@ struct ScheduleView: View {
                 Spacer()
                 if !slot.isBase {
                     Button("削除") { slots.removeAll { $0.id == slot.id } }
+                        .accessibilityLabel("\(number)回目を削除")
                 }
             }
             if slot.isBase {
@@ -207,6 +240,7 @@ struct ScheduleView: View {
                             DatePicker("", selection: $stageDates[i], displayedComponents: .hourAndMinute)
                                 .labelsHidden()
                                 .frame(width: 90)
+                                .accessibilityLabel("\(number)回目の\(stageLabels[i])")
                         }
                     }
                 }
@@ -217,6 +251,7 @@ struct ScheduleView: View {
                     DatePicker("", selection: enforceBinding(slot.id), displayedComponents: .hourAndMinute)
                         .labelsHidden()
                         .frame(width: 90)
+                        .accessibilityLabel("\(number)回目の強制終了")
                 }
                 Text(derivedStages(slot.enforce))
                     .font(.callout)
@@ -225,17 +260,18 @@ struct ScheduleView: View {
         }
     }
 
-    /// 追加の回の予告・警告・最終通告。基準の回の間隔をそのまま前に付ける（デーモンと同じ計算）。
+    /// 追加の回の予告・警告・最終通告。組み立てはデーモンと共通のConfParser.sessionsに任せる。
     private func derivedStages(_ enforce: Date) -> String {
         guard stageDates.count == 4 else { return "" }
-        let base = stageDates.map(DaemonModel.minuteOfDay)
         let end = DaemonModel.minuteOfDay(enforce)
-        let names = ["予告", "警告", "最終通告"]
-        return (0..<3).map { i in
-            let m = end - (base[3] - base[i])
-            // 0:00より前にはみ出す設定はvalidationMessageが止める。ここでは見せ方だけ揃える
-            return m < 0 ? "\(names[i])前日" : "\(names[i])" + String(format: "%02d:%02d", m / 60, m % 60)
-        }.joined(separator: " / ")
+        guard let session = ConfParser.sessions(provisionalState).first(where: { $0.enforce == end }) else { return "" }
+        // 基準の段階の順が崩れている編集途中は、計算した時刻が意味を持たない（赤字で保存も止まる）
+        let base = stageDates.map(DaemonModel.minuteOfDay)
+        guard zip(base, base.dropFirst()).allSatisfy({ $0 < $1 }) else { return "" }
+        // 0:00より前にはみ出す設定はvalidationMessageが止める。ここでは見せ方だけ揃える
+        let label: (String, Int) -> String = { name, m in m < 0 ? "\(name)前日" : name + ConfParser.hhmm(m) }
+        return [label("予告", session.notice), label("警告", session.warn), label("最終通告", session.final)]
+            .joined(separator: " / ")
     }
 
     /// 削除した直後、消えたまとまりのDatePickerが読みに来ることがあるので、idで引いて無ければ触らない。
@@ -244,6 +280,7 @@ struct ScheduleView: View {
             get: { slots.first { $0.id == id }?.enforce ?? Date() },
             set: { v in
                 if let k = slots.firstIndex(where: { $0.id == id }) { slots[k].enforce = v }
+                sortSlots()
             }
         )
     }
@@ -256,12 +293,10 @@ struct ScheduleView: View {
         slots.sort { DaemonModel.minuteOfDay(enforceDate($0)) < DaemonModel.minuteOfDay(enforceDate($1)) }
     }
 
-    /// 足した回の初期値。12:00から1時間ずつ、まだ使っていない時刻を探す。
-    /// 重なりの判定はvalidationMessageに任せる（ここで避けきる必要はない）。
+    /// 足した回の初期値は、足しても重ならない正時（ConfParser.nextFreeEnforce）。
     private func addSlot() {
-        let used = Set(timeStrings + extraTimeStrings)
-        let hour = (12...23).first { !used.contains(String(format: "%02d:00", $0)) } ?? 12
-        slots.append(Slot(isBase: false, enforce: dateOf(String(format: "%02d:00", hour))))
+        guard let time = ConfParser.nextFreeEnforce(provisionalState) else { return }
+        slots.append(Slot(isBase: false, enforce: dateOf(time)))
         sortSlots()
     }
 
@@ -296,6 +331,9 @@ struct ScheduleView: View {
         for i in 1..<4 where mins[i] <= mins[i - 1] {
             return "時刻は早い順に並べてください（\(stageLabels[i]) が前の段階より早いか同時刻です）"
         }
+        if let opened = loadedConf, opened != model.conf {
+            return "開いているあいだに設定ファイルが変わりました。閉じて開き直してください"
+        }
         // 回どうしの重なりはデーモンのreloadでも断られる。保存前に同じ規則で止める
         return ConfParser.sessionProblem(provisionalState)
     }
@@ -316,7 +354,12 @@ struct ScheduleView: View {
     /// 効かなくなるほうが害が大きい。
     private var warningMessages: [String] {
         guard validationMessage == nil, stageDates.count == 4 else { return [] }
-        return ConfParser.warnings(for: provisionalState)
+        var warnings = ConfParser.warnings(for: provisionalState)
+        // 0.6より前の本体はEXTRA_ENFORCEを知らず、reloadは通るのに追加の回では落ちない
+        if model.updateAvailable && !extraTimeStrings.isEmpty {
+            warnings.append("導入済みの本体がこのアプリと違います。メニューの「本体を入れ直す…」を押すまで、追加の回は効かないことがあります")
+        }
+        return warnings
     }
 
     private func save() {
@@ -325,4 +368,9 @@ struct ScheduleView: View {
                          extraEnforce: extraTimeStrings)
         dismiss()
     }
+}
+
+private struct SlotsHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
