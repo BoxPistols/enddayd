@@ -174,6 +174,8 @@ resolve_console() {
 # アプリを終了したら止めたい人向けの選択肢。既定（0）では何も見ない。
 app_gate_closed() {
   [ "$REQUIRE_APP" = "1" ] || return 1
+  # resolve_consoleの後でしか使わない。UIDが無いまま見ると全ユーザーのプロセスに当たるので、止めずに通す
+  [ -n "${CONSOLE_UID:-}" ] || return 1
   ! /usr/bin/pgrep -x "$APP_PROC" -u "$CONSOLE_UID" >/dev/null 2>&1
 }
 

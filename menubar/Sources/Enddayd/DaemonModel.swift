@@ -379,7 +379,9 @@ final class DaemonModel: ObservableObject {
         // 本体が古いと新しい項目を読まないので、同じパスワード入力で入れ直す。
         // installは既存の設定とモードを保ったまま本体を差し替え、読み込み直す
         var apply = "/bin/bash \(Admin.shQuote(Self.binPath)) reload"
-        if updateAvailable, let script = Self.bundledScriptPath {
+        // updateAvailableは30秒ごとの背景の比較で、開いた直後はまだfalseのことがある。保存時に比べ直す
+        if let script = Self.bundledScriptPath,
+           DaemonProbe.installedDiffers(bundled: script, installed: Self.binPath) {
             apply = "/bin/bash \(Admin.shQuote(script)) install"
         }
         let cmd = "/usr/bin/printf '%b\\n' \(Admin.shQuote(content)) > \(Self.confPath) && \(apply)"
