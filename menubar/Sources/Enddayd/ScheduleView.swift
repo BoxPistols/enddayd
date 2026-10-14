@@ -42,6 +42,7 @@ struct ScheduleView: View {
     @State private var level: EnforceLevel = .normal
     @State private var logout = true
     @State private var bypass = true
+    @State private var requireApp = false
     @State private var grace = 10
     /// 画面に並べる回。基準の回（TIMES）と追加の回（EXTRA_ENFORCE）を、強制終了の
     /// 早い順に並べる。番号をデーモンやメニューの回の順と揃えるため、時刻を動かして
@@ -148,6 +149,8 @@ struct ScheduleView: View {
                     Toggle("当日スキップを許す", isOn: $bypass)
                         .help("date +%F > /etc/enddayd.skip でその日だけ見送れるようにする")
                     Stepper("最終段階を受け付ける猶予: \(grace) 分", value: $grace, in: 0...120)
+                    Toggle("アプリを終了したら、通知と強制終了も止める", isOn: $requireApp)
+                        .help("オフなら、アプリを終了してもデーモンが通知と強制終了を続けます")
                 }
                 .padding(6)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -210,6 +213,7 @@ struct ScheduleView: View {
         level = model.level
         logout = model.logoutAttempt
         bypass = model.allowBypass
+        requireApp = model.requireApp
         grace = model.killGrace
     }
 
@@ -345,6 +349,7 @@ struct ScheduleView: View {
         state.level = level
         state.logoutAttempt = logout
         state.allowBypass = bypass
+        state.requireApp = requireApp
         state.killGrace = grace
         state.extraEnforce = extraTimeStrings
         return state
@@ -355,9 +360,13 @@ struct ScheduleView: View {
     private var warningMessages: [String] {
         guard validationMessage == nil, stageDates.count == 4 else { return [] }
         var warnings = ConfParser.warnings(for: provisionalState)
-        // 0.6より前の本体はEXTRA_ENFORCEを知らず、reloadは通るのに追加の回では落ちない
-        if model.updateAvailable && !extraTimeStrings.isEmpty {
-            warnings.append("導入済みの本体がこのアプリと違います。メニューの「本体を入れ直す…」を押すまで、追加の回は効かないことがあります")
+        // 古い本体は新しい項目（EXTRA_ENFORCE・REQUIRE_APP）を読まない。保存で入れ直すことを先に伝える
+        if model.updateAvailable {
+            warnings.append("導入済みの本体がこのアプリと違うので、保存すると本体も入れ直します")
+        }
+        // 再起動後にアプリが起動しないと、その日は何も起きない
+        if requireApp && !model.launchesAtLogin {
+            warnings.append("「ログイン時に起動」がオフです。再起動後にアプリを開くまで、通知も強制終了も止まったままになります")
         }
         return warnings
     }
@@ -365,7 +374,7 @@ struct ScheduleView: View {
     private func save() {
         model.saveConfig(times: timeStrings, weekdays: days, level: level,
                          logout: logout, bypass: bypass, grace: grace,
-                         extraEnforce: extraTimeStrings)
+                         extraEnforce: extraTimeStrings, requireApp: requireApp)
         dismiss()
     }
 }

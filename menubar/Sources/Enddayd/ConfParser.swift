@@ -18,6 +18,8 @@ struct ConfState: Equatable {
     var extraEnforce: [String] = []
     /// 作業開始からの上限（WORK_LIMIT）。書かれた形のまま持つ。空なら無し。
     var workLimit = ""
+    /// REQUIRE_APP。trueならメニューバーのアプリを終了すると通知も強制終了も止まる。
+    var requireApp = false
 
     /// 検証を通らなかった理由。空でなければデーモンは走らない。
     var problems: [String] = []
@@ -96,6 +98,14 @@ enum ConfParser {
                 state.allowBypass = flag
             } else {
                 problems.append("ALLOW_BYPASS は 0 か 1 です: \(raw)")
+            }
+        }
+
+        if let raw = dict["REQUIRE_APP"] {
+            if let flag = boolFlag(raw) {
+                state.requireApp = flag
+            } else {
+                problems.append("REQUIRE_APPは0か1です: \(raw)")
             }
         }
 

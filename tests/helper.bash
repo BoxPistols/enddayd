@@ -70,6 +70,13 @@ EOF
 #!/bin/bash
 echo "    | |   \"HIDIdleTime\" = ${ENDDAYD_TEST_IDLE_NS:-5000000000}"
 EOF
+  # メニューバーのアプリが起動しているか（REQUIRE_APPで見る）。
+  # $SANDBOX/app_stoppedがあれば起動していないことにする。既定は起動中。
+  cat >"$SANDBOX/bin/pgrep" <<EOF
+#!/bin/bash
+[ -f "$SANDBOX/app_stopped" ] && exit 1
+echo 4242
+EOF
   cat >"$SANDBOX/bin/afplay" <<'EOF'
 #!/bin/bash
 exit 0
@@ -93,6 +100,7 @@ EOF
     -e "s#/usr/bin/osascript#$SANDBOX/bin/osascript#g" \
     -e "s#/usr/bin/afplay#$SANDBOX/bin/afplay#g" \
     -e "s#/usr/sbin/ioreg#$SANDBOX/bin/ioreg#g" \
+    -e "s#/usr/bin/pgrep#$SANDBOX/bin/pgrep#g" \
     -e "s#/sbin/shutdown#$SANDBOX/bin/shutdown#g" \
     -e "s#^BIN=.*#BIN=$SANDBOX/installed/enddayd.sh#" \
     -e "s#^PLIST=.*#PLIST=$SANDBOX/installed/local.enddayd.plist#" \

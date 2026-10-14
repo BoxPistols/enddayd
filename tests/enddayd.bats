@@ -1360,3 +1360,62 @@ conf_with_work_limit() {
   run bash "$SCRIPT" status
   contains "$output" "タイマー監視: 未登録"
 }
+
+# --- アプリを終了したら止める（REQUIRE_APP） ----------------------------
+
+# REQUIRE_APP=1でアプリが起動していなければ、何も出さずに記録だけ残す
+@test "require app: skips when the menu bar app is not running" {
+  echo 'REQUIRE_APP="1"' >>"$SANDBOX/etc/conf"
+  : >"$SANDBOX/app_stopped"
+  run run_at 1080
+  [ "$status" -eq 0 ]
+  contains "$output" "skip: app not running"
+  not_contains "$output" "stage="
+}
+
+@test "require app: runs while the menu bar app is running" {
+  echo 'REQUIRE_APP="1"' >>"$SANDBOX/etc/conf"
+  run run_at 1080
+  contains "$output" "stage=notice"
+  not_contains "$output" "app not running"
+}
+
+# 既定（0）ではアプリを終了しても動き続ける
+@test "require app: the default keeps running without the app" {
+  : >"$SANDBOX/app_stopped"
+  run run_at 1080
+  contains "$output" "stage=notice"
+}
+
+# 手で流すstageは止めない。確かめたいときに黙って何も出ないと困る
+@test "require app: the stage command ignores the gate" {
+  echo 'REQUIRE_APP="1"' >>"$SANDBOX/etc/conf"
+  : >"$SANDBOX/app_stopped"
+  run as_root bash "$SCRIPT" stage notice
+  contains "$output" "stage=notice"
+}
+
+# タイマー監視も止まる。タイマーは消さず、アプリを開き直せば続きから動く
+@test "require app: tick stays quiet and keeps the timer" {
+  echo 'REQUIRE_APP="1"' >>"$SANDBOX/etc/conf"
+  : >"$SANDBOX/app_stopped"
+  write_timer_in 540
+  run tick_dry
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ -f "$SANDBOX/etc/timer" ]
+}
+
+@test "require app: rejects a value other than 0 or 1" {
+  echo 'REQUIRE_APP="yes"' >>"$SANDBOX/etc/conf"
+  run run_at 1080
+  [ "$status" -ne 0 ]
+  contains "$output" "config invalid"
+  contains "$output" "REQUIRE_APPは0か1です"
+}
+
+@test "require app: config shows what happens when the app quits" {
+  echo 'REQUIRE_APP="1"' >>"$SANDBOX/etc/conf"
+  run bash "$SCRIPT" config
+  contains "$output" "アプリ終了時: 止まる"
+}

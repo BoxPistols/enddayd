@@ -44,6 +44,7 @@ final class DaemonModel: ObservableObject {
     var level: EnforceLevel { conf.level }
     var logoutAttempt: Bool { conf.logoutAttempt }
     var allowBypass: Bool { conf.allowBypass }
+    var requireApp: Bool { conf.requireApp }
     var killGrace: Int { conf.killGrace }
     var confBroken: Bool { conf.isBroken }
     var confProblems: [String] { conf.problems }
@@ -356,7 +357,7 @@ final class DaemonModel: ObservableObject {
     /// デーモン側の reload も同じ検証を持つので、二重で守られる。
     func saveConfig(times newTimes: [String], weekdays newDays: Set<Int>,
                     level newLevel: EnforceLevel, logout: Bool, bypass: Bool, grace: Int,
-                    extraEnforce newExtra: [String]) {
+                    extraEnforce newExtra: [String], requireApp newRequireApp: Bool) {
         let sorted = newDays.sorted().map(String.init).joined(separator: ",")
         let lines = [
             "# enddayd 設定ファイル。手で編集したら sudo \(Self.binPath) reload を実行してください。",
@@ -371,10 +372,17 @@ final class DaemonModel: ObservableObject {
             // これは画面ではまだ編集できない。いまの値をそのまま書き戻す。
             // 書かなければ、時刻を直して保存しただけで黙って消える。
             "WORK_LIMIT=\"\(conf.workLimit)\"",
+            "REQUIRE_APP=\"\(newRequireApp ? 1 : 0)\"",
         ]
         // 値の文字種は数字・コロン・カンマ・英小文字に限られるので printf で安全に書ける
         let content = lines.joined(separator: "\\n")
-        let cmd = "/usr/bin/printf '%b\\n' \(Admin.shQuote(content)) > \(Self.confPath) && /bin/bash \(Admin.shQuote(Self.binPath)) reload"
+        // 本体が古いと新しい項目を読まないので、同じパスワード入力で入れ直す。
+        // installは既存の設定とモードを保ったまま本体を差し替え、読み込み直す
+        var apply = "/bin/bash \(Admin.shQuote(Self.binPath)) reload"
+        if updateAvailable, let script = Self.bundledScriptPath {
+            apply = "/bin/bash \(Admin.shQuote(script)) install"
+        }
+        let cmd = "/usr/bin/printf '%b\\n' \(Admin.shQuote(content)) > \(Self.confPath) && \(apply)"
         adminAction(cmd)
     }
 
