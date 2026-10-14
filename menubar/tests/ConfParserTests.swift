@@ -82,6 +82,10 @@ enum ConfParserTests {
         t.equal(ConfParser.workLimitMinutes("24:00"), nil, "WORK_LIMIT stays within a day")
         t.equal(ConfParser.workLimitMinutes("0"), nil, "WORK_LIMIT of zero is refused")
         t.expect(ConfParser.parse(valid + "\nWORK_LIMIT=\"abc\"").isBroken, "a malformed WORK_LIMIT breaks the conf")
+        // REQUIRE_APPは書かれていなければアプリを終了しても動き続ける
+        t.expect(!ConfParser.parse(valid).requireApp, "REQUIRE_APP defaults to off")
+        t.expect(ConfParser.parse(valid + "\nREQUIRE_APP=\"1\"").requireApp, "REQUIRE_APP=1 is read")
+        t.expect(ConfParser.parse(valid + "\nREQUIRE_APP=\"yes\"").isBroken, "a malformed REQUIRE_APP breaks the conf")
     }
 
     // 妥当な設定はそのまま読める

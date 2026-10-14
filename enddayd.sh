@@ -52,6 +52,9 @@ WORKSTART_FILE=/etc/enddayd.workstart
 # ジョブを別に置く。本体（${LABEL}）に毎分の発火を混ぜると、予告の時間帯に
 # 毎分アラートが出てしまうので分ける。
 TICK_LABEL=local.enddayd.tick
+
+# メニューバーのアプリのプロセス名（REQUIRE_APPで見る）
+APP_PROC=Enddayd
 TICK_PLIST="/Library/LaunchDaemons/${TICK_LABEL}.plist"
 
 # 「今日だけ」の延長で選べる分数。
@@ -93,6 +96,7 @@ ALLOW_BYPASS="1"                  # 当日スキップを許すか
 KILL_GRACE="10"                   # 最終ステージを受け付ける猶予（分）
 EXTRA_ENFORCE=""                  # 追加の強制終了時刻（例: "12:00,15:00"）。空なら無し
 WORK_LIMIT=""                     # 作業開始からの上限（例: "8" や "7:30"）。空なら無し
+REQUIRE_APP="0"                   # 1ならメニューバーのアプリが起動しているときだけ動く
 
 CONF_SYNTAX_ERROR=0
 if [ -f "$CONF" ]; then
@@ -164,6 +168,15 @@ resolve_console() {
   if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ]; then return 1; fi
   CONSOLE_UID=$(/usr/bin/id -u "$CONSOLE_USER" 2>/dev/null) || return 1
   [ -n "$CONSOLE_UID" ]
+}
+
+# REQUIRE_APP=1で、ログイン中のユーザーがメニューバーのアプリを起動していなければ1を返す。
+# アプリを終了したら止めたい人向けの選択肢。既定（0）では何も見ない。
+app_gate_closed() {
+  [ "$REQUIRE_APP" = "1" ] || return 1
+  # resolve_consoleの後でしか使わない。UIDが無いまま見ると全ユーザーのプロセスに当たるので、止めずに通す
+  [ -n "${CONSOLE_UID:-}" ] || return 1
+  ! /usr/bin/pgrep -x "$APP_PROC" -u "$CONSOLE_UID" >/dev/null 2>&1
 }
 
 asuser() { /bin/launchctl asuser "$CONSOLE_UID" /usr/bin/sudo -u "$CONSOLE_USER" "$@"; }
@@ -282,6 +295,11 @@ validate_conf() {
   case "$ALLOW_BYPASS" in
     0|1) ;;
     *) conf_err "ALLOW_BYPASS は 0 か 1 です: ALLOW_BYPASS=\"$ALLOW_BYPASS\"" ;;
+  esac
+
+  case "$REQUIRE_APP" in
+    0|1) ;;
+    *) conf_err "REQUIRE_APPは0か1です: REQUIRE_APP=\"$REQUIRE_APP\"" ;;
   esac
 
   if [ -n "$WORK_LIMIT" ] && [ -z "$(work_limit_min)" ]; then
@@ -592,6 +610,11 @@ cmd_run() {
     log "skip: no gui user"; exit 0
   fi
 
+  # 手で流すリハーサル（rehearse / stage）では見ない。確かめたいときに黙って何も出ないと困る
+  if [ -z "${ENDDAYD_MANUAL:-}" ] && app_gate_closed; then
+    log "skip: app not running"; exit 0
+  fi
+
   # ステージは実行時の時計で決める。スリープ復帰後の遅延実行で誤爆しない。
   local MIN
   if [ -n "$FORCE_MIN" ]; then MIN="$FORCE_MIN"
@@ -817,6 +840,8 @@ cmd_tick() {
   # 出すと、直すための操作すらできなくなる。
   [ -n "$CONF_ERRORS" ] && exit 0
   resolve_console || exit 0
+  # 毎分呼ばれるのでログには残さない。残すと1日に数百行になる
+  app_gate_closed && exit 0
 
   read_today
   [ -n "$TODAY_LEVEL" ] && LEVEL="$TODAY_LEVEL"
@@ -1028,6 +1053,8 @@ KILL_GRACE="$KILL_GRACE"
 EXTRA_ENFORCE="$EXTRA_ENFORCE"
 # 作業開始からの上限（例: "8" や "7:30"）。開始はその日最初に操作を見た時刻
 WORK_LIMIT="$WORK_LIMIT"
+# 1ならメニューバーのアプリが起動しているときだけ動く。0ならアプリを終了しても動く
+REQUIRE_APP="$REQUIRE_APP"
 EOF
   chmod 644 "$CONF"; chown root:wheel "$CONF"
 }
@@ -1655,6 +1682,7 @@ cmd_config_body() {
   fi
   echo "レベル      : $(level_label "$LEVEL")"
   echo "当日スキップ: $([ "$ALLOW_BYPASS" = 1 ] && echo 許可 || echo 不可)"
+  echo "アプリ終了時: $([ "$REQUIRE_APP" = 1 ] && echo 止まる || echo 動き続ける)"
   if [ -n "${MODE_OVERRIDE:-}" ]; then
     echo "モード      : $MODE_OVERRIDE"
   else
@@ -1722,7 +1750,7 @@ cmd_rehearsal() {
   for s in notice warn final enforce; do
     m=$(stage_min "$s") || exit 1
     echo "--- $s ---"
-    ENDDAYD_DRY_RUN=1 ENDDAYD_FORCE_MIN="$m" bash "$0" run || true
+    ENDDAYD_MANUAL=1 ENDDAYD_DRY_RUN=1 ENDDAYD_FORCE_MIN="$m" bash "$0" run || true
     [ "$s" = "enforce" ] || sleep "$gap"
   done
   echo "リハーサル完了。"
@@ -1733,7 +1761,7 @@ cmd_stage() {
   require_valid_conf || exit 1
   local m
   m=$(stage_min "${1:-notice}") || exit 1
-  ENDDAYD_DRY_RUN=1 ENDDAYD_FORCE_MIN="$m" bash "$0" run
+  ENDDAYD_MANUAL=1 ENDDAYD_DRY_RUN=1 ENDDAYD_FORCE_MIN="$m" bash "$0" run
 }
 
 usage() { sed -n '2,/^set -/p' "$0" | sed 's/^# \{0,1\}//; /^set -/d'; }

@@ -188,7 +188,10 @@ struct MenuContent: View {
         Text("バージョン \(Self.appVersion)")
 
         Divider()
-        Button("終了") { NSApplication.shared.terminate(nil) }
+        // デーモンはアプリと別に動くので、終了で何が止まるかを名前で示す
+        Button(model.requireApp ? "終了（通知と強制終了も止まります）" : "終了（通知と強制終了は動き続けます）") {
+            NSApplication.shared.terminate(nil)
+        }
     }
 
     // ------------------------------------------------------------ 確認 ---
