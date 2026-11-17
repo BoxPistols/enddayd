@@ -97,6 +97,8 @@ final class DaemonModel: ObservableObject {
     // --- 操作の進行状態 ---
     @Published var busy = false
     @Published var lastError: String?
+    /// 最後に記録した端末の作業（enddayd.shのsnapshot_terminalsが書く）
+    @Published var terminalSnapshot: TerminalSnapshot.Summary?
 
     private var timer: AnyCancellable?
 
@@ -125,6 +127,7 @@ final class DaemonModel: ObservableObject {
         readToday()
         readTimer()
         readLog()
+        readTerminalSnapshot()
         refreshProbes()
     }
 
@@ -165,6 +168,13 @@ final class DaemonModel: ObservableObject {
             return
         }
         logFacts = LogReader.facts(text, today: Self.dateFormatter.string(from: Date()))
+    }
+
+    private func readTerminalSnapshot() {
+        // 開き直す対象は、電源が落ちる前の最後の記録（enddayd.shが再起動の後に写す）
+        let path = TerminalSnapshot.directory(home: NSHomeDirectory()) + "/prev-boot.tsv"
+        let text = try? String(contentsOfFile: path, encoding: .utf8)
+        terminalSnapshot = text.flatMap(TerminalSnapshot.parse)
     }
 
     /// 外部プロセスとファイル比較は背景でやる。30秒ごとに主スレッドを
@@ -314,6 +324,36 @@ final class DaemonModel: ObservableObject {
             return
         }
         adminAction("/bin/bash \(Admin.shQuote(script)) install")
+    }
+
+    /// 記録した端末の作業をiTerm2で開き直す。利用者として動かす（管理者権限は要らない。
+    /// rootで開くとrootのタブになる）。導入済みの本体を優先し、無ければ同梱のものを使う。
+    func restoreTerminals() {
+        let script = FileManager.default.fileExists(atPath: Self.binPath)
+            ? Self.binPath
+            : (Self.bundledScriptPath ?? Self.binPath)
+        lastError = nil
+        Task.detached(priority: .userInitiated) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+            proc.arguments = [script, "restore"]
+            let err = Pipe()
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = err
+            var failure: String?
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                if proc.terminationStatus != 0 {
+                    let data = err.fileHandleForReading.readDataToEndOfFile()
+                    failure = String(data: data, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? "開き直せませんでした"
+                }
+            } catch {
+                failure = error.localizedDescription
+            }
+            await MainActor.run { [weak self, failure] in self?.lastError = failure }
+        }
     }
 
     func uninstall() {

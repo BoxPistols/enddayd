@@ -57,13 +57,40 @@ EOF
 shift 2   # -u <user>
 exec "$@"
 EOF
-  cat >"$SANDBOX/bin/osascript" <<'EOF'
+  # restoreが組み立てたAppleScriptを見るため、iTerm2宛ての呼び出しだけ残す
+  cat >"$SANDBOX/bin/osascript" <<EOF
 #!/bin/bash
-case "$*" in
+case "\$*" in
   *"application process"*) echo "iTerm2, Chrome" ;;
+  *iTerm2*) printf '%s\n' "\$*" >>"$SANDBOX/osascript.iterm" ;;
 esac
 exit 0
 EOF
+  # 端末の記録（snapshot_terminals）用。psは$SANDBOX/ps.outをそのまま返し、
+  # lsofは$SANDBOX/cwd.<pid> を作業ディレクトリとして返す。
+  cat >"$SANDBOX/bin/ps" <<EOF
+#!/bin/bash
+cat "$SANDBOX/ps.out" 2>/dev/null
+EOF
+  # $SANDBOX/lsof_hangがあれば戻らない（応答しないネットワークのマウントを模す）
+  cat >"$SANDBOX/bin/lsof" <<EOF
+#!/bin/bash
+[ -f "$SANDBOX/lsof_hang" ] && sleep 6
+pid=""
+while [ \$# -gt 0 ]; do [ "\$1" = "-p" ] && pid="\$2"; shift; done
+[ -f "$SANDBOX/cwd.\$pid" ] && echo "n\$(cat "$SANDBOX/cwd.\$pid")"
+exit 0
+EOF
+  # 起動時刻。$SANDBOX/boottimeがあればその値（エポック秒）、無ければ大昔
+  cat >"$SANDBOX/bin/sysctl" <<EOF
+#!/bin/bash
+echo "{ sec = \$(cat "$SANDBOX/boottime" 2>/dev/null || echo 1), usec = 0 } Thu Jan  1 09:00:01 1970"
+EOF
+  cat >"$SANDBOX/bin/dscl" <<EOF
+#!/bin/bash
+echo "NFSHomeDirectory: $SANDBOX/home"
+EOF
+  mkdir -p "$SANDBOX/home"
   # 最後の操作からの時間。既定は 5 秒前（いま操作している）。
   # ENDDAYD_TEST_IDLE_NS で差し替える（ナノ秒）。
   cat >"$SANDBOX/bin/ioreg" <<'EOF'
@@ -101,6 +128,11 @@ EOF
     -e "s#/usr/bin/afplay#$SANDBOX/bin/afplay#g" \
     -e "s#/usr/sbin/ioreg#$SANDBOX/bin/ioreg#g" \
     -e "s#/usr/bin/pgrep#$SANDBOX/bin/pgrep#g" \
+    -e "s#/bin/ps #$SANDBOX/bin/ps #g" \
+    -e "s#/usr/sbin/lsof#$SANDBOX/bin/lsof#g" \
+    -e "s#/usr/bin/dscl#$SANDBOX/bin/dscl#g" \
+    -e "s#/usr/sbin/sysctl#$SANDBOX/bin/sysctl#g" \
+    -e "s#^SNAPSHOT_TIMEOUT_SEC=.*#SNAPSHOT_TIMEOUT_SEC=3#" \
     -e "s#/sbin/shutdown#$SANDBOX/bin/shutdown#g" \
     -e "s#^BIN=.*#BIN=$SANDBOX/installed/enddayd.sh#" \
     -e "s#^PLIST=.*#PLIST=$SANDBOX/installed/local.enddayd.plist#" \
@@ -282,3 +314,28 @@ write_timer_in() {
 write_workstart_ago() {
   printf '%s\n' "DATE=$(date +%F)" "START=$(( $(date +%s) - $1 ))" >"$SANDBOX/etc/workstart"
 }
+
+# --- 端末の記録 ---------------------------------------------------------
+
+# 端末を1つ足す: add_terminal <pid> <tty> <作業ディレクトリ> <コマンド…>
+# 前面のジョブの先頭として足す（pid = pgid = tpgid）。
+add_terminal() {
+  local pid="$1" tty="$2" cwd="$3"; shift 3
+  printf '%s %s %s %s %s\n' "$pid" "$pid" "$pid" "$tty" "$*" >>"$SANDBOX/ps.out"
+  printf '%s' "$cwd" >"$SANDBOX/cwd.$pid"
+}
+
+# Claude Codeが置くプロセスごとの情報ファイルを模す
+add_claude_session() {
+  mkdir -p "$SANDBOX/home/.claude/sessions"
+  printf '{"pid":%s,"sessionId":"%s","cwd":"/x","status":"%s"}\n' "$1" "$2" "$3" \
+    >"$SANDBOX/home/.claude/sessions/$1.json"
+}
+
+snapshot_root() { echo "$SANDBOX/home/Library/Application Support/enddayd/terminals"; }
+latest_snapshot() { cat "$(snapshot_root)/latest.tsv" 2>/dev/null; }
+prev_boot_snapshot() { cat "$(snapshot_root)/prev-boot.tsv" 2>/dev/null; }
+stage_snapshots() { ls -1 "$(snapshot_root)" 2>/dev/null | grep -v '^latest' ; }
+
+# restoreは利用者として走る（id -uは501を返す）
+restore_as_user() { HOME="$SANDBOX/home" bash "$SCRIPT" restore "$@" 2>"$SANDBOX/stderr"; }

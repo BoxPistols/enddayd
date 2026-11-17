@@ -20,12 +20,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct EnddaydApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = DaemonModel()
+    @StateObject private var updater = Updater()
     @AppStorage("iconTint") private var tint: IconTint = .gold
 
     var body: some Scene {
         MenuBarExtra {
             MenuContent()
                 .environmentObject(model)
+                .environmentObject(updater)
         } label: {
             // メニューバーに常駐する本体。テキストは状態に追従する
             // 色を付けるのは動いている状態だけ（IconTint の説明を参照）
@@ -37,6 +39,10 @@ struct EnddaydApp: App {
             }
             if !model.barText.isEmpty {
                 Text(model.barText)
+            }
+            // 更新があることはメニューを開かなくても見えるようにする
+            if updater.available != nil {
+                Image(systemName: "arrow.down.circle.fill")
             }
         }
         .menuBarExtraStyle(.menu)

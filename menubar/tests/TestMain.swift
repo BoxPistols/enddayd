@@ -8,14 +8,16 @@ import Foundation
 @main
 struct TestMain {
 
-    /// ConfParserTests 52 件 + LogReaderTests 23 件 + TodayOverrideTests 28 件
-    static let planned = 109
+    /// ConfParserTests 52件 + LogReaderTests 23件 + TodayOverrideTests 28件 + TerminalSnapshotTests 7件 + UpdateCheckTests 18件
+    static let planned = 134
 
     static func main() {
         var harness = Harness()
         ConfParserTests.run(&harness)
         LogReaderTests.run(&harness)
         TodayOverrideTests.run(&harness)
+        TerminalSnapshotTests.run(&harness)
+        UpdateCheckTests.run(&harness)
         harness.finish(planned: planned)
     }
 }

@@ -3,17 +3,33 @@ import AppKit
 
 struct MenuContent: View {
     @EnvironmentObject var model: DaemonModel
+    @EnvironmentObject var updater: Updater
     @Environment(\.openWindow) private var openWindow
     @AppStorage("iconTint") private var tint: IconTint = .gold
 
     var body: some View {
         Group {
+            if let r = updater.available {
+                Button(updater.busy ? "\(r.version)に更新しています…" : "\(r.version)に更新する（いまは\(Updater.currentVersion)）") {
+                    updater.update()
+                }
+                .disabled(updater.busy)
+                Divider()
+            }
             statusSection
             Divider()
             if model.installed {
                 actionSection
                 Divider()
                 logSection
+                Divider()
+            }
+            // 強制終了で消えた端末の作業を開き直す。記録が無ければ出さない。
+            // 本体を外した後でも、残った記録から開き直せるようにinstalledの外に置く
+            if let snap = model.terminalSnapshot {
+                Button("端末の作業を開き直す（\(TerminalSnapshot.label(snap))）") {
+                    model.restoreTerminals()
+                }
                 Divider()
             }
             manageSection
@@ -186,6 +202,8 @@ struct MenuContent: View {
         // 版を出しておく。出ていないと「入れ直したのに古いままでは」を
         // 確かめる手段が無く、動作の報告と実際の版が結び付かない。
         Text("バージョン \(Self.appVersion)")
+        Button(updater.checking ? "更新を確認しています…" : "更新を確認") { updater.check(manual: true) }
+            .disabled(updater.busy || updater.checking)
 
         Divider()
         // デーモンはアプリと別に動くので、終了で何が止まるかを名前で示す
