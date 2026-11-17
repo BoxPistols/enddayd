@@ -94,6 +94,13 @@ struct MenuContent: View {
             Button("今日はスキップ") { model.skipTodayOn() }
         }
 
+        // 強制終了で消えた端末の作業を開き直す。記録が無ければ出さない
+        if let snap = model.terminalSnapshot {
+            Button("端末の作業を開き直す（\(TerminalSnapshot.label(snap))）") {
+                model.restoreTerminals()
+            }
+        }
+
         // 今日だけの調整。恒久的な設定変更とは別の場所に置く。
         // 同じ場所に混ぜると「今日だけのつもりが毎日変わった」が起きる。
         Menu("今日だけ調整する") {

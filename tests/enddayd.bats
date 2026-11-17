@@ -1419,3 +1419,100 @@ conf_with_work_limit() {
   run bash "$SCRIPT" config
   contains "$output" "アプリ終了時: 止まる"
 }
+
+# --- 端末の作業の記録と復元 ---------------------------------------------
+
+# 警告の段階で、端末ごとのディレクトリ・コマンド・Claude Codeの会話IDを残す
+@test "snapshot: warn stage records terminals with claude session" {
+  add_terminal 100 ttys001 /work/app "-zsh"
+  add_terminal 200 ttys002 /work/api claude --dangerously-skip-permissions
+  add_claude_session 200 sess-abc busy
+  add_terminal 300 ttys003 /work/web npm run dev
+  run run_at 1110
+  contains "$output" "terminals saved: 3件 (warn)"
+  local s; s=$(latest_snapshot)
+  contains "$s" "ttys002	/work/api	claude	claude --dangerously-skip-permissions	sess-abc	busy"
+  contains "$s" "ttys003	/work/web	command	npm run dev"
+  contains "$s" "ttys001	/work/app	shell"
+  contains "$(stage_snapshots)" "_warn.tsv"
+}
+
+# 前面のジョブの先頭でないプロセス（npmから生えたnode、端末を持たないもの）は数えない
+@test "snapshot: only foreground job leaders on a terminal are recorded" {
+  add_terminal 100 ttys001 /work/web npm run dev
+  printf '101 100 100 ttys001 node server.js\n' >>"$SANDBOX/ps.out"
+  printf '102 102 102 ?? /usr/libexec/something\n' >>"$SANDBOX/ps.out"
+  printf '/work/web' >"$SANDBOX/cwd.101"; printf '/' >"$SANDBOX/cwd.102"
+  run run_at 1110
+  contains "$output" "terminals saved: 1件"
+  not_contains "$(latest_snapshot)" "node server.js"
+}
+
+# 強制終了の直前にも残す（本番モード。shutdownより前に書かれていること）
+@test "snapshot: enforce stage records before shutdown" {
+  add_terminal 100 ttys001 /work/app "-zsh"
+  run run_at_live 1130
+  contains "$(log_text)" "terminals saved: 1件 (enforce)"
+  contains "$(stage_snapshots)" "_enforce.tsv"
+  contains "$(shutdown_calls)" "shutdown -h now"
+}
+
+# 毎分の記録はlatestだけを上書きし、段階の記録とログは増やさない
+@test "snapshot: tick updates latest only and stays quiet" {
+  add_terminal 100 ttys001 /work/app "-zsh"
+  run tick_dry
+  contains "$(latest_snapshot)" "tick"
+  contains "$(latest_snapshot)" "/work/app"
+  local n; n=$(stage_snapshots | wc -l | tr -d ' ')
+  contains "$n" "0"
+  not_contains "$(log_text)" "terminals"
+}
+
+# 端末が1つも無いときは前の記録を消さない（終了の途中でiTerm2が先に閉じた場合）
+@test "snapshot: empty terminal list keeps previous record" {
+  add_terminal 100 ttys001 /work/app "-zsh"
+  run tick_dry
+  : >"$SANDBOX/ps.out"
+  run run_at 1110
+  contains "$output" "terminals not saved"
+  contains "$(latest_snapshot)" "/work/app"
+}
+
+# 復元の計画: Claude Codeは元のオプションのまま会話を指定し直し、
+# 開発サーバーなどのコマンドはEnterを押さずに入力欄へ入れるだけ
+@test "restore: print plan resumes claude and leaves commands unsent" {
+  add_terminal 200 ttys002 /work/api claude --dangerously-skip-permissions --continue
+  add_claude_session 200 sess-abc idle
+  add_terminal 300 ttys003 "/work/it's here" npm run dev
+  run run_at 1110
+  run restore_as_user --print
+  contains "$output" "cd '/work/api' && claude --dangerously-skip-permissions --resume sess-abc"
+  not_contains "$output" "--continue --resume"
+  contains "$output" "cd '/work/it'\\''s here' && npm run dev   （Enterは押さない）"
+}
+
+# 会話IDが読めなければ、そのディレクトリの最後の会話に倒す
+@test "restore: claude without session id falls back to continue" {
+  add_terminal 200 ttys002 /work/api claude
+  run run_at 1110
+  run restore_as_user --print
+  contains "$output" "cd '/work/api' && claude --continue"
+}
+
+# 実際に開くときはiTerm2にタブごとの入力を渡す。コマンドの行だけ改行しない
+@test "restore: opens iterm tabs with escaped text" {
+  add_terminal 100 ttys001 /work/app "-zsh"
+  add_terminal 300 ttys003 /work/web 'echo "hi"'
+  run run_at 1110
+  run restore_as_user
+  local a; a=$(cat "$SANDBOX/osascript.iterm")
+  contains "$a" "write text \"cd '/work/app'\""
+  contains "$a" "create tab with default profile"
+  contains "$a" "write text \"cd '/work/web' && echo \\\"hi\\\"\" newline no"
+}
+
+# rootで復元するとrootのタブが開くので断る
+@test "restore: refuses to run as root" {
+  run as_root bash "$SCRIPT" restore --print
+  contains "$output" "sudoを付けずに"
+}

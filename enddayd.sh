@@ -17,6 +17,8 @@
 #   sudo ./enddayd.sh uninstall        削除
 #   sudo ./enddayd.sh run              LaunchDaemon から呼ばれる本体（時刻指定）
 #   sudo ./enddayd.sh tick             LaunchDaemon から毎分呼ばれる本体（タイマー）
+#   ./enddayd.sh restore [--print|list|<記録>]
+#                                      記録した端末の作業をiTerm2で開き直す（sudoなし）
 #
 # 既定のスケジュール（月〜金）
 #   18:00  終了準備のアラート
@@ -211,6 +213,95 @@ automation_probe() {
   asuser /usr/bin/osascript -e \
     'tell application "System Events" to get name of every application process whose background only is false' \
     2>/dev/null
+}
+
+# ------------------------------------------------- 端末の作業の記録 ---
+#
+# 電源が落ちると、端末で動いていたプロセスは戻せない。戻せるのは
+# 「どの端末で・どのディレクトリで・何を動かしていたか」までなので、それを
+# 利用者のホームに書いておき、ログイン後にrestoreで開き直す。
+#
+# 書く時機は2つ。各段階（予告・警告・最終通告・強制終了の直前）と、毎分の
+# tick。段階の記録は残し、毎分の記録はlatest.tsvを上書きする。電源ボタンの
+# 長押しやバッテリー切れでは段階を通らないので、毎分の記録が最後の手がかりになる。
+#
+# 1行が1端末。列はタブ区切りで
+#   端末  作業ディレクトリ  種類(shell|claude|command)  コマンド  会話ID  会話の状態
+# 1行目だけは「# 時刻 段階」の見出し。
+
+SNAPSHOT_KEEP=30
+
+user_home() {
+  /usr/bin/dscl . -read "/Users/$1" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: //p'
+}
+
+snapshot_dir() { echo "$1/Library/Application Support/enddayd/terminals"; }
+
+# プロセスの作業ディレクトリ
+proc_cwd() { /usr/sbin/lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1; }
+
+# Claude Codeはプロセスごとに ~/.claude/sessions/<pid>.jsonを置き、会話IDを
+# 持っている。公開された仕様ではないので、読めなければ空で返し、復元側は
+# そのディレクトリの最後の会話（--continue）に倒す。
+claude_session_field() {
+  sed -n "s/.*\"$3\":\"\\([^\"]*\\)\".*/\\1/p" "$1/.claude/sessions/$2.json" 2>/dev/null | head -n 1
+}
+
+# 標準出力に記録の本文（見出しを除く）を出す。端末が1つも無ければ何も出さない。
+collect_terminals() {
+  local home="$1" pid pgid tpgid tty cmd cwd kind sid st name
+  # 前面のジョブの先頭（pidが端末の前面プロセスグループと一致するもの）だけを
+  # 取る。npmから生えたnodeのような子は先頭のコマンドに含まれる。
+  /bin/ps -U "$CONSOLE_UID" -o pid=,pgid=,tpgid=,tty=,command= 2>/dev/null |
+  while read -r pid pgid tpgid tty cmd; do
+    case "$tty" in ttys*) ;; *) continue ;; esac
+    [ "$pid" = "$tpgid" ] || continue
+    cwd=$(proc_cwd "$pid")
+    [ -n "$cwd" ] || continue
+    sid=""; st=""
+    name="${cmd%% *}"; name="${name##*/}"
+    case "$name" in
+      -zsh|zsh|-bash|bash|-sh|sh|-fish|fish) kind=shell; cmd="" ;;
+      claude)     kind=claude
+                  sid=$(claude_session_field "$home" "$pid" sessionId)
+                  st=$(claude_session_field "$home" "$pid" status) ;;
+      *)          kind=command ;;
+    esac
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$tty" "$cwd" "$kind" "$(echo "$cmd" | tr '\t' ' ')" "$sid" "$st"
+  done | sort
+}
+
+# snapshot_terminals <段階名|tick>
+# 呼ぶ前にresolve_consoleが通っていること。失敗しても段階の処理は止めない。
+snapshot_terminals() {
+  local tag="$1" home dir body n
+  home=$(user_home "$CONSOLE_USER")
+  if [ -z "$home" ]; then
+    [ "$tag" = "tick" ] || log "terminals not saved: ホームが分かりません"
+    return 0
+  fi
+  dir=$(snapshot_dir "$home")
+  body=$(collect_terminals "$home")
+  # 0件で上書きしない。終了の途中でiTerm2が先に閉じたときの記録が、
+  # その前の記録を消してしまうため。
+  if [ -z "$body" ]; then
+    [ "$tag" = "tick" ] || log "terminals not saved: 端末が開いていません"
+    return 0
+  fi
+  n=$(printf '%s\n' "$body" | wc -l | tr -d ' ')
+  # rootのまま利用者のホームに書くと所有者がrootになり、利用者が消せなくなる
+  printf '# %s %s\n%s\n' "$(date '+%F %T')" "$tag" "$body" |
+    asuser /bin/sh -c '
+      umask 077
+      mkdir -p "$1" || exit 1
+      cat >"$1/latest.tsv.tmp" && mv "$1/latest.tsv.tmp" "$1/latest.tsv" || exit 1
+      [ "$2" = tick ] && exit 0
+      cp "$1/latest.tsv" "$1/$(date +%F_%H%M)_$2.tsv"
+      ls -1t "$1"/????-??-??_*.tsv 2>/dev/null | tail -n +$(($3 + 1)) | while read -r f; do rm -f "$f"; done
+    ' sh "$dir" "$tag" "$SNAPSHOT_KEEP" >/dev/null 2>&1 \
+    || { log "terminals not saved: 書き込みに失敗しました ($dir)"; return 0; }
+  [ "$tag" = "tick" ] || log "terminals saved: ${n}件 ($tag)"
+  return 0
 }
 
 # --------------------------------------------------------- 設定の検証 ---
@@ -684,6 +775,8 @@ cmd_run() {
 # 呼ぶ前に resolve_console が通っていること。
 perform_stage() {
   local STAGE="$1" KILL_AT="$2" TITLE="$3"
+  # アラートは閉じるまで戻らないので、その前に記録する
+  snapshot_terminals "$STAGE"
   case "$STAGE" in
 
     notice)
@@ -842,6 +935,9 @@ cmd_tick() {
   resolve_console || exit 0
   # 毎分呼ばれるのでログには残さない。残すと1日に数百行になる
   app_gate_closed && exit 0
+
+  # 段階を通らない終わり方（電源ボタンの長押しなど）に備えた毎分の記録
+  snapshot_terminals tick
 
   read_today
   [ -n "$TODAY_LEVEL" ] && LEVEL="$TODAY_LEVEL"
@@ -1764,6 +1860,88 @@ cmd_stage() {
   ENDDAYD_MANUAL=1 ENDDAYD_DRY_RUN=1 ENDDAYD_FORCE_MIN="$m" bash "$0" run
 }
 
+# ---------------------------------------------------- 端末の作業の復元 ---
+#
+# 利用者として（sudoなしで）実行する。記録した端末ごとにiTerm2のタブを開き、
+#   shell   … そのディレクトリへ移るだけ
+#   claude  … 元の起動オプションのまま、記録した会話を --resumeで再開する
+#   command … コマンドを入力欄に入れて止める。開発サーバーなどを勝手に
+#             二重起動させないため、実行は利用者がEnterで決める
+
+# シェルの単一引用符で囲む
+sh_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# AppleScriptの文字列リテラルの中身にする
+as_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+# 元のコマンドから会話を選ぶ指定を外し、記録した会話を指定し直す
+claude_resume_cmd() {
+  local cmd="$1" sid="$2"
+  cmd=$(printf ' %s ' "$cmd" | sed -E 's/ (--resume|-r) [^ ]+ / /g; s/ (--continue|-c) / /g; s/^ +//; s/ +$//')
+  if [ -n "$sid" ]; then echo "$cmd --resume $sid"; else echo "$cmd --continue"; fi
+}
+
+# restore_plan <記録ファイル> : 1端末1行で「タブで実行する行<TAB>Enterを押すか(1|0)」
+restore_plan() {
+  local tty cwd kind cmd sid st cd_line
+  grep -v '^#' "$1" | while IFS=$'\t' read -r tty cwd kind cmd sid st; do
+    [ -n "$cwd" ] || continue
+    cd_line="cd $(sh_quote "$cwd")"
+    case "$kind" in
+      claude)  printf '%s\t1\n' "$cd_line && $(claude_resume_cmd "$cmd" "$sid")" ;;
+      command) printf '%s\t0\n' "$cd_line && $cmd" ;;
+      *)       printf '%s\t1\n' "$cd_line" ;;
+    esac
+  done
+}
+
+cmd_restore() {
+  local arg="${1:-}" home dir file line enter first=1 script
+  if [ "$(id -u)" -eq 0 ]; then echo "restoreはsudoを付けずに実行してください" >&2; exit 1; fi
+  home="$HOME"
+  dir=$(snapshot_dir "$home")
+  case "$arg" in
+    list)
+      ls -1t "$dir"/*.tsv 2>/dev/null || echo "記録はまだありません（${dir}）"
+      return 0 ;;
+    ''|--print) file="$dir/latest.tsv" ;;
+    *) file="$arg" ;;
+  esac
+  if [ ! -f "$file" ]; then echo "記録がありません: $file" >&2; exit 1; fi
+
+  echo "記録: ${file}（$(head -n 1 "$file" | sed 's/^# //')）"
+  grep -v '^#' "$file" | awk -F'\t' '{
+    s = ($3 == "claude") ? "Claude Code " $5 ($6 == "busy" ? "（応答の途中で切れています）" : "") \
+      : ($3 == "command") ? $4 : "シェル"
+    printf "  %-8s %s\n           %s\n", $1, $2, s }'
+
+  # --printは計画を見せるだけ。テストと、開く前に中身を確かめたいとき用
+  if [ "$arg" = "--print" ]; then
+    echo; echo "開くときにタブで入力する行:"
+    restore_plan "$file" | awk -F'\t' '{ printf "  %s%s\n", $1, ($2 == "1" ? "" : "   （Enterは押さない）") }'
+    return 0
+  fi
+
+  script='tell application "iTerm2"'$'\n''activate'$'\n''set w to (create window with default profile)'$'\n'
+  while IFS=$'\t' read -r line enter; do
+    if [ "$first" = "0" ]; then
+      script+='tell w to set t to (create tab with default profile)'$'\n'
+    fi
+    first=0
+    if [ "$enter" = "1" ]; then
+      script+="tell current session of w to write text \"$(as_escape "$line")\""$'\n'
+    else
+      script+="tell current session of w to write text \"$(as_escape "$line")\" newline no"$'\n'
+    fi
+  done < <(restore_plan "$file")
+  script+='end tell'
+  if [ "$first" = "1" ]; then echo "開く端末がありません"; return 0; fi
+  /usr/bin/osascript -e "$script" >/dev/null || {
+    echo "iTerm2を開けませんでした。システム設定 > プライバシーとセキュリティ > 自動化 で許可を確認してください" >&2
+    exit 1
+  }
+}
+
 usage() { sed -n '2,/^set -/p' "$0" | sed 's/^# \{0,1\}//; /^set -/d'; }
 
 case "${1:-}" in
@@ -1777,6 +1955,7 @@ case "${1:-}" in
   today)      cmd_today "${2:-show}" "${3:-}" "${4:-}" ;;
   timer)      cmd_timer "${2:-show}" "${3:-}" ;;
   tick)       cmd_tick ;;
+  restore)    cmd_restore "${2:-}" ;;
   status)     cmd_status ;;
   rehearsal)  cmd_rehearsal "${2:-}" ;;
   stage)      cmd_stage "${2:-notice}" ;;
