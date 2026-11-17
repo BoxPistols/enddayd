@@ -43,6 +43,20 @@ enum UpdateCheck {
         }
     }
 
+    enum Outcome: Equatable {
+        case newer(Release)
+        case upToDate
+        /// 通信の失敗・想定外の応答。「最新」とは言わず、次の機会に確かめ直す
+        case failed
+    }
+
+    /// 応答から結果を決める。404はReleaseが1つも無い状態なので「最新」と同じに扱う
+    static func outcome(status: Int?, data: Data?, current: String) -> Outcome {
+        if status == 404 { return .upToDate }
+        guard status == 200, let data, let r = parse(data) else { return .failed }
+        return isNewer(r.version, than: current) ? .newer(r) : .upToDate
+    }
+
     /// releases/latestの応答を読む。下書きと先行版は対象にしない
     static func parse(_ data: Data) -> Release? {
         guard let p = try? JSONDecoder().decode(Payload.self, from: data),

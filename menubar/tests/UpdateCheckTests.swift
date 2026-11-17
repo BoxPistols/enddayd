@@ -28,5 +28,14 @@ enum UpdateCheckTests {
         let pre = #"{"tag_name":"v1.0.0","html_url":"https://example.com/r","prerelease":true}"#
         t.equal(UpdateCheck.parse(Data(pre.utf8)), nil, "prerelease is ignored")
         t.equal(UpdateCheck.parse(Data("not json".utf8)), nil, "broken response is ignored")
+
+        // 失敗を「最新」と取り違えない。取り違えると、既知の更新の知らせが消える
+        let ok = Data(json.utf8)
+        t.equal(UpdateCheck.outcome(status: 200, data: ok, current: "0.8.0"), .newer(r!), "newer release is reported")
+        t.equal(UpdateCheck.outcome(status: 200, data: ok, current: "0.9.0"), .upToDate, "same version is up to date")
+        t.equal(UpdateCheck.outcome(status: 404, data: nil, current: "0.8.0"), .upToDate, "no release yet is up to date")
+        t.equal(UpdateCheck.outcome(status: 500, data: nil, current: "0.8.0"), .failed, "server error is a failure")
+        t.equal(UpdateCheck.outcome(status: nil, data: nil, current: "0.8.0"), .failed, "network error is a failure")
+        t.equal(UpdateCheck.outcome(status: 200, data: Data("x".utf8), current: "0.8.0"), .failed, "broken body is a failure")
     }
 }

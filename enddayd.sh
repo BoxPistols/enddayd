@@ -231,6 +231,15 @@ automation_probe() {
 
 SNAPSHOT_KEEP=30
 
+# 記録が強制終了を止めないための上限（秒）。lsofは応答しないネットワークの
+# マウントで戻らないことがあるので、待つのはここまでにして先へ進む。
+SNAPSHOT_TIMEOUT_SEC=5
+
+# 起動した時刻（エポック秒）。読めなければ0（＝前回の起動の記録は作らない）
+boot_epoch() {
+  /usr/sbin/sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9]*\),.*/\1/p'
+}
+
 user_home() {
   /usr/bin/dscl . -read "/Users/$1" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: //p'
 }
@@ -290,19 +299,45 @@ snapshot_terminals() {
   fi
   n=$(printf '%s\n' "$body" | wc -l | tr -d ' ')
   # rootのまま利用者のホームに書くと所有者がrootになり、利用者が消せなくなる
-  # 中の$1〜$3は利用者側のshが展開するので、単一引用符のままでよい
+  # 中の$1〜$4は利用者側のshが展開するので、単一引用符のままでよい
   # shellcheck disable=SC2016
+  # latest.tsvが今回の起動より前に書かれたものなら、上書きする前にprev-boot.tsvへ写す。
+  # 再起動のあと復元する前に毎分の記録が走ると、電源が落ちる前の記録が消えるため。
   printf '# %s %s\n%s\n' "$(date '+%F %T')" "$tag" "$body" |
     asuser /bin/sh -c '
       umask 077
       mkdir -p "$1" || exit 1
+      if [ -f "$1/latest.tsv" ] && [ "$(date -r "$1/latest.tsv" +%s)" -lt "$4" ]; then
+        cp "$1/latest.tsv" "$1/prev-boot.tsv"
+      fi
       cat >"$1/latest.tsv.tmp" && mv "$1/latest.tsv.tmp" "$1/latest.tsv" || exit 1
       [ "$2" = tick ] && exit 0
       cp "$1/latest.tsv" "$1/$(date +%F_%H%M)_$2.tsv"
       ls -1t "$1"/????-??-??_*.tsv 2>/dev/null | tail -n +$(($3 + 1)) | while read -r f; do rm -f "$f"; done
-    ' sh "$dir" "$tag" "$SNAPSHOT_KEEP" >/dev/null 2>&1 \
+    ' sh "$dir" "$tag" "$SNAPSHOT_KEEP" "$(boot_epoch || echo 0)" >/dev/null 2>&1 \
     || { log "terminals not saved: 書き込みに失敗しました ($dir)"; return 0; }
   [ "$tag" = "tick" ] || log "terminals saved: ${n}件 ($tag)"
+  return 0
+}
+
+# 記録を時間の上限つきで行う。記録が戻らなくても、アラートと強制終了は先へ進める。
+# 背景の出力は捨てる（結果はlogでファイルに残る）。端末を握ったまま残ると、
+# 呼び出し側が出力の終わりを待ち続けるため。
+snapshot_bounded() {
+  local tag="$1" pid killer rc
+  snapshot_terminals "$tag" >/dev/null 2>&1 &
+  pid=$!
+  # 終わった背景のプロセスにもkill -0は成功するので、生死を見て回るのではなく
+  # waitで待ち、上限の時刻に別の背景プロセスが打ち切る
+  ( sleep "$SNAPSHOT_TIMEOUT_SEC"; /usr/bin/pkill -P "$pid"; kill "$pid" ) >/dev/null 2>&1 &
+  killer=$!
+  wait "$pid"
+  rc=$?
+  kill "$killer" 2>/dev/null
+  wait "$killer" 2>/dev/null
+  if [ "$rc" -ge 128 ]; then
+    log "terminals not saved: ${SNAPSHOT_TIMEOUT_SEC}秒で終わらなかったので打ち切りました ($tag)"
+  fi
   return 0
 }
 
@@ -778,7 +813,7 @@ cmd_run() {
 perform_stage() {
   local STAGE="$1" KILL_AT="$2" TITLE="$3"
   # アラートは閉じるまで戻らないので、その前に記録する
-  snapshot_terminals "$STAGE"
+  snapshot_bounded "$STAGE"
   case "$STAGE" in
 
     notice)
@@ -939,7 +974,7 @@ cmd_tick() {
   app_gate_closed && exit 0
 
   # 段階を通らない終わり方（電源ボタンの長押しなど）に備えた毎分の記録
-  snapshot_terminals tick
+  snapshot_bounded tick
 
   read_today
   [ -n "$TODAY_LEVEL" ] && LEVEL="$TODAY_LEVEL"
@@ -1866,7 +1901,9 @@ cmd_stage() {
 #
 # 利用者として（sudoなしで）実行する。記録した端末ごとにiTerm2のタブを開き、
 #   shell   … そのディレクトリへ移るだけ
-#   claude  … 元の起動オプションのまま、記録した会話を --resumeで再開する
+#   claude  … 元の起動オプションのまま、記録した会話を--resumeで再開する。
+#             psは引数の区切りと引用符を失うので、安全な文字だけでできている
+#             ときに限ってEnterを押す。それ以外は入力欄に入れて止める
 #   command … コマンドを入力欄に入れて止める。開発サーバーなどを勝手に
 #             二重起動させないため、実行は利用者がEnterで決める
 
@@ -1876,21 +1913,42 @@ sh_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 # AppleScriptの文字列リテラルの中身にする
 as_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
-# 元のコマンドから会話を選ぶ指定を外し、記録した会話を指定し直す
+# 元のコマンドから会話を選ぶ指定を外し、記録した会話を指定し直す。
+# --resume/-rは値を取らない形（選択画面）もあるので、次の語が-で始まるなら値と見なさない
 claude_resume_cmd() {
   local cmd="$1" sid="$2"
-  cmd=$(printf ' %s ' "$cmd" | sed -E 's/ (--resume|-r) [^ ]+ / /g; s/ (--continue|-c) / /g; s/^ +//; s/ +$//')
+  cmd=$(printf '%s\n' "$cmd" | awk '{
+    out = ""; skip = 0
+    for (i = 1; i <= NF; i++) {
+      w = $i
+      if (skip) { skip = 0; if (w !~ /^-/) continue }
+      if (w == "--continue" || w == "-c" || w ~ /^--resume=/) continue
+      if (w == "--resume" || w == "-r") { skip = 1; continue }
+      out = out (out == "" ? "" : " ") w
+    }
+    print out }')
   if [ -n "$sid" ]; then echo "$cmd --resume $sid"; else echo "$cmd --continue"; fi
 }
 
+# Enterを押して実行してよい文字だけでできているか。`;`・`$( )`・引用符が混じれば実行しない
+safe_words() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9._/=:@+,[:space:]-]*$'; }
+
 # restore_plan <記録ファイル> : 1端末1行で「タブで実行する行<TAB>Enterを押すか(1|0)」
 restore_plan() {
-  local tty cwd kind cmd sid st cd_line
-  grep -v '^#' "$1" | while IFS=$'\t' read -r tty cwd kind cmd sid st; do
+  local tty cwd kind cmd sid st cd_line resume enter
+  # タブは空白の扱いなので、readは連続したタブ（空の列）を詰めてしまう。
+  # 空白でない区切り（0x1f）に置き換えてから読む
+  grep -v '^#' "$1" | awk -F'\t' -v OFS=$'\x1f' '{ $1 = $1; print }' |
+  while IFS=$'\x1f' read -r tty cwd kind cmd sid st; do
     [ -n "$cwd" ] || continue
     cd_line="cd $(sh_quote "$cwd")"
     case "$kind" in
-      claude)  printf '%s\t1\n' "$cd_line && $(claude_resume_cmd "$cmd" "$sid")" ;;
+      claude)
+        # 会話IDの形が想定と違えば使わない（--continueに倒す）
+        printf '%s' "$sid" | grep -Eq '^[A-Za-z0-9-]+$' || sid=""
+        resume=$(claude_resume_cmd "$cmd" "$sid")
+        if safe_words "$resume"; then enter=1; else enter=0; fi
+        printf '%s\t%s\n' "$cd_line && $resume" "$enter" ;;
       command) printf '%s\t0\n' "$cd_line && $cmd" ;;
       *)       printf '%s\t1\n' "$cd_line" ;;
     esac
@@ -1906,7 +1964,10 @@ cmd_restore() {
     list)
       ls -1t "$dir"/*.tsv 2>/dev/null || echo "記録はまだありません（${dir}）"
       return 0 ;;
-    ''|--print) file="$dir/latest.tsv" ;;
+    # 再起動のあとはprev-boot.tsv（電源が落ちる前の最後の記録）を開く
+    ''|--print)
+      file="$dir/prev-boot.tsv"
+      [ -f "$file" ] || file="$dir/latest.tsv" ;;
     *) file="$arg" ;;
   esac
   if [ ! -f "$file" ]; then echo "記録がありません: $file" >&2; exit 1; fi

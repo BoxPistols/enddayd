@@ -1429,7 +1429,7 @@ conf_with_work_limit() {
   add_claude_session 200 sess-abc busy
   add_terminal 300 ttys003 /work/web npm run dev
   run run_at 1110
-  contains "$output" "terminals saved: 3件 (warn)"
+  contains "$(log_text)" "terminals saved: 3件 (warn)"
   local s; s=$(latest_snapshot)
   contains "$s" "ttys002	/work/api	claude	claude --dangerously-skip-permissions	sess-abc	busy"
   contains "$s" "ttys003	/work/web	command	npm run dev"
@@ -1444,7 +1444,7 @@ conf_with_work_limit() {
   printf '102 102 102 ?? /usr/libexec/something\n' >>"$SANDBOX/ps.out"
   printf '/work/web' >"$SANDBOX/cwd.101"; printf '/' >"$SANDBOX/cwd.102"
   run run_at 1110
-  contains "$output" "terminals saved: 1件"
+  contains "$(log_text)" "terminals saved: 1件"
   not_contains "$(latest_snapshot)" "node server.js"
 }
 
@@ -1474,7 +1474,7 @@ conf_with_work_limit() {
   run tick_dry
   : >"$SANDBOX/ps.out"
   run run_at 1110
-  contains "$output" "terminals not saved"
+  contains "$(log_text)" "terminals not saved"
   contains "$(latest_snapshot)" "/work/app"
 }
 
@@ -1515,4 +1515,68 @@ conf_with_work_limit() {
 @test "restore: refuses to run as root" {
   run as_root bash "$SCRIPT" restore --print
   contains "$output" "sudoを付けずに"
+}
+
+# 記録が戻らなくても（lsofが応答しない）、段階の処理は上限で打ち切って先へ進む
+@test "snapshot: a hanging lsof does not block the enforce stage" {
+  add_terminal 100 ttys001 /work/app "-zsh"
+  : >"$SANDBOX/lsof_hang"
+  run run_at_live 1130
+  contains "$(log_text)" "terminals not saved: 3秒で終わらなかった"
+  contains "$(shutdown_calls)" "shutdown -h now"
+}
+
+# 起動より前に書かれたlatestは、上書きする前にprev-bootへ写す。復元はそちらを開く
+@test "snapshot: record from before boot is kept as prev-boot and restored" {
+  add_terminal 100 ttys001 /work/before "-zsh"
+  run tick_dry
+  touch -t 202001010000 "$(snapshot_root)/latest.tsv"
+  date +%s >"$SANDBOX/boottime"
+  : >"$SANDBOX/ps.out"
+  add_terminal 200 ttys001 /work/after "-zsh"
+  run tick_dry
+  contains "$(prev_boot_snapshot)" "/work/before"
+  contains "$(latest_snapshot)" "/work/after"
+  run restore_as_user --print
+  contains "$output" "cd '/work/before'"
+  not_contains "$output" "/work/after"
+}
+
+# 同じ起動のうちはprev-bootを作らない（毎分の上書きで前回の記録が入れ替わらない）
+@test "snapshot: no prev-boot within the same boot" {
+  add_terminal 100 ttys001 /work/app "-zsh"
+  run tick_dry
+  run tick_dry
+  contains "$(ls "$(snapshot_root)")" "latest.tsv"
+  not_contains "$(ls "$(snapshot_root)")" "prev-boot"
+}
+
+# 引数にシェルの特殊文字があるClaude Codeは、Enterを押さずに入力欄へ入れるだけ
+@test "restore: claude with shell metacharacters is not executed" {
+  add_terminal 200 ttys002 /work/api 'claude fix a; rm x'
+  add_claude_session 200 sess-abc idle
+  run run_at 1110
+  run restore_as_user --print
+  contains "$output" "claude fix a; rm x --resume sess-abc   （Enterは押さない）"
+}
+
+# --resumeの書き方の違い（=付き、値なしで次がオプション）をどれも外す
+@test "restore: resume flags in any form are replaced" {
+  add_terminal 200 ttys002 /work/api claude --resume=old-id -r --dangerously-skip-permissions -c
+  add_claude_session 200 sess-abc idle
+  run run_at 1110
+  run restore_as_user --print
+  contains "$output" "cd '/work/api' && claude --dangerously-skip-permissions --resume sess-abc"
+  not_contains "$output" "old-id"
+}
+
+# 会話IDの列が空で状態だけある行は、状態を会話IDと取り違えない
+@test "restore: empty session id column is not shifted" {
+  add_terminal 200 ttys002 /work/api claude
+  mkdir -p "$SANDBOX/home/.claude/sessions"
+  printf '{"pid":200,"status":"busy"}\n' >"$SANDBOX/home/.claude/sessions/200.json"
+  run run_at 1110
+  run restore_as_user --print
+  contains "$output" "cd '/work/api' && claude --continue"
+  not_contains "$output" "--resume busy"
 }

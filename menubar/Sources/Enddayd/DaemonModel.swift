@@ -171,7 +171,8 @@ final class DaemonModel: ObservableObject {
     }
 
     private func readTerminalSnapshot() {
-        let path = TerminalSnapshot.directory(home: NSHomeDirectory()) + "/latest.tsv"
+        // 開き直す対象は、電源が落ちる前の最後の記録（enddayd.shが再起動の後に写す）
+        let path = TerminalSnapshot.directory(home: NSHomeDirectory()) + "/prev-boot.tsv"
         let text = try? String(contentsOfFile: path, encoding: .utf8)
         terminalSnapshot = text.flatMap(TerminalSnapshot.parse)
     }

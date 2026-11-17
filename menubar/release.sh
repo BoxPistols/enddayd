@@ -21,6 +21,20 @@ if [ -z "${DEVELOPER_DIR:-}" ] && [ -d /Applications/Xcode.app ]; then
   export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 fi
 
+# Releaseのタグと添付のzipが同じソースを指すように、コミット済みで、pushしたmainと
+# 同じ状態のときだけ作る
+if [ "${1:-}" = "--publish" ]; then
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "コミットしていない変更があります。Releaseはコミット済みの状態から作ります" >&2
+    exit 1
+  fi
+  git fetch -q origin main
+  if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+    echo "いまのコミットがorigin/mainと違います。mainを取り込んでから作ってください" >&2
+    exit 1
+  fi
+fi
+
 ./build.sh
 # Finderの圧縮と同じ形式。zipコマンドだとアプリの拡張属性と署名が崩れることがある
 /usr/bin/ditto -c -k --keepParent dist/Enddayd.app "$ZIP"
@@ -31,5 +45,5 @@ if [ "${1:-}" = "--publish" ]; then
     echo "v${VERSION} のReleaseはもうあります。Info.plistの版を上げてください" >&2
     exit 1
   fi
-  gh release create "v${VERSION}" "$ZIP" --target main --title "v${VERSION}" --generate-notes
+  gh release create "v${VERSION}" "$ZIP" --target "$(git rev-parse HEAD)" --title "v${VERSION}" --generate-notes
 fi

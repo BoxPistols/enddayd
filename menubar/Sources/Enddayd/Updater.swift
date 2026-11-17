@@ -12,6 +12,8 @@ final class Updater: ObservableObject {
 
     @Published private(set) var available: UpdateCheck.Release?
     @Published private(set) var busy = false
+    /// 確認の通信中。続けて押されても要求を重ねない
+    @Published private(set) var checking = false
     @Published private(set) var lastError: String?
 
     private static let checkInterval: TimeInterval = 24 * 60 * 60
@@ -42,26 +44,34 @@ final class Updater: ObservableObject {
 
     /// manualはメニューの「更新を確認」から。結果を必ず画面に出す
     func check(manual: Bool) {
+        guard !checking, !busy else { return }
+        checking = true
         var request = URLRequest(url: UpdateCheck.latestURL)
         // GitHubはUser-Agentの無い要求を断る。利用者を識別する情報は載せない
         request.setValue("Enddayd", forHTTPHeaderField: "User-Agent")
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         Task {
-            let release: UpdateCheck.Release?
+            let outcome: UpdateCheck.Outcome
             do {
                 let (data, response) = try await URLSession.shared.data(for: request)
-                let ok = (response as? HTTPURLResponse)?.statusCode == 200
-                release = ok ? UpdateCheck.parse(data) : nil
+                outcome = UpdateCheck.outcome(status: (response as? HTTPURLResponse)?.statusCode,
+                                              data: data, current: Self.currentVersion)
             } catch {
-                release = nil
+                outcome = .failed
             }
-            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.lastCheckKey)
-            if let release, UpdateCheck.isNewer(release.version, than: Self.currentVersion) {
+            checking = false
+            switch outcome {
+            case .newer(let release):
+                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.lastCheckKey)
                 available = release
                 promptOnce(release, force: manual)
-            } else {
+            case .upToDate:
+                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.lastCheckKey)
                 available = nil
                 if manual { inform("最新です（\(Self.currentVersion)）", "") }
+            case .failed:
+                // 確認時刻は進めない（1時間後にまた確かめる）。既に知っている更新の知らせは残す
+                if manual { inform("更新を確認できませんでした", "通信できないか、GitHubから想定外の応答がありました。時間をおいてもう一度試してください。") }
             }
         }
     }
@@ -82,15 +92,20 @@ final class Updater: ObservableObject {
     }
 
     func update() {
-        guard let r = available else { return }
+        // 確認が重なってポップアップから再び呼ばれても、置き換えを重ねない
+        guard !busy, let r = available else { return }
         guard let asset = r.assetURL else {
             NSWorkspace.shared.open(r.pageURL)
+            return
+        }
+        // 自分のIDが分からなければ、取ってきた中身が同じアプリかを確かめられないので更新しない
+        guard let bundleID = Bundle.main.bundleIdentifier, !bundleID.isEmpty else {
+            inform("更新できませんでした", "このアプリのバンドルIDを読めませんでした。")
             return
         }
         busy = true
         lastError = nil
         let target = Bundle.main.bundleURL
-        let bundleID = Bundle.main.bundleIdentifier ?? ""
         Task.detached(priority: .userInitiated) {
             let failure: String?
             do {

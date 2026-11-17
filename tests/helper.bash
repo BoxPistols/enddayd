@@ -72,12 +72,19 @@ EOF
 #!/bin/bash
 cat "$SANDBOX/ps.out" 2>/dev/null
 EOF
+  # $SANDBOX/lsof_hangがあれば戻らない（応答しないネットワークのマウントを模す）
   cat >"$SANDBOX/bin/lsof" <<EOF
 #!/bin/bash
+[ -f "$SANDBOX/lsof_hang" ] && sleep 6
 pid=""
 while [ \$# -gt 0 ]; do [ "\$1" = "-p" ] && pid="\$2"; shift; done
 [ -f "$SANDBOX/cwd.\$pid" ] && echo "n\$(cat "$SANDBOX/cwd.\$pid")"
 exit 0
+EOF
+  # 起動時刻。$SANDBOX/boottimeがあればその値（エポック秒）、無ければ大昔
+  cat >"$SANDBOX/bin/sysctl" <<EOF
+#!/bin/bash
+echo "{ sec = \$(cat "$SANDBOX/boottime" 2>/dev/null || echo 1), usec = 0 } Thu Jan  1 09:00:01 1970"
 EOF
   cat >"$SANDBOX/bin/dscl" <<EOF
 #!/bin/bash
@@ -124,6 +131,8 @@ EOF
     -e "s#/bin/ps #$SANDBOX/bin/ps #g" \
     -e "s#/usr/sbin/lsof#$SANDBOX/bin/lsof#g" \
     -e "s#/usr/bin/dscl#$SANDBOX/bin/dscl#g" \
+    -e "s#/usr/sbin/sysctl#$SANDBOX/bin/sysctl#g" \
+    -e "s#^SNAPSHOT_TIMEOUT_SEC=.*#SNAPSHOT_TIMEOUT_SEC=3#" \
     -e "s#/sbin/shutdown#$SANDBOX/bin/shutdown#g" \
     -e "s#^BIN=.*#BIN=$SANDBOX/installed/enddayd.sh#" \
     -e "s#^PLIST=.*#PLIST=$SANDBOX/installed/local.enddayd.plist#" \
@@ -325,6 +334,7 @@ add_claude_session() {
 
 snapshot_root() { echo "$SANDBOX/home/Library/Application Support/enddayd/terminals"; }
 latest_snapshot() { cat "$(snapshot_root)/latest.tsv" 2>/dev/null; }
+prev_boot_snapshot() { cat "$(snapshot_root)/prev-boot.tsv" 2>/dev/null; }
 stage_snapshots() { ls -1 "$(snapshot_root)" 2>/dev/null | grep -v '^latest' ; }
 
 # restoreは利用者として走る（id -uは501を返す）
