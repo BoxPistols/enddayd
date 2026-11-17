@@ -1499,6 +1499,18 @@ conf_with_work_limit() {
   contains "$output" "cd '/work/api' && claude --continue"
 }
 
+# --printと記録の指定を一緒に渡したら、指定した記録を見せる（latestに倒さない）
+@test "restore: print with a file shows that file" {
+  add_terminal 100 ttys001 /work/latest "-zsh"
+  run run_at 1110
+  local saved="$SANDBOX/saved.tsv"
+  sed 's#/work/latest#/work/saved#' "$(snapshot_root)/latest.tsv" >"$saved"
+  run restore_as_user --print "$saved"
+  contains "$output" "記録: $saved"
+  contains "$output" "cd '/work/saved'"
+  not_contains "$output" "/work/latest"
+}
+
 # 実際に開くときはiTerm2にタブごとの入力を渡す。コマンドの行だけ改行しない
 @test "restore: opens iterm tabs with escaped text" {
   add_terminal 100 ttys001 /work/app "-zsh"

@@ -212,7 +212,7 @@ sudo ./enddayd.sh stage warn
 | `stage <名前>` | `notice` / `warn` / `final` / `enforce` を単体で確認 |
 | `plist [tick]` | 生成される plist を標準出力に表示（`tick` でタイマー監視のほう） |
 | `log` | ログを追う |
-| `restore [--print\|list\|<記録>]` | 記録した端末の作業をiTerm2で開き直す（sudoなしで実行） |
+| `restore [--print] [list\|<記録>]` | 記録した端末の作業をiTerm2で開き直す（sudoなしで実行） |
 | `uninstall` | 削除（設定ファイルは残す） |
 
 ## 強制終了のレベル
