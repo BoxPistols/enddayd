@@ -6,7 +6,7 @@ import AppKit
 ///
 /// 置き換えるのはアプリだけ。常駐している本体（/usr/local/bin/enddayd.sh）は
 /// 管理者権限が要るので、更新後にDaemonModelが違いを検出して
-/// 「本体を入れ直す…」を出す既存の経路に任せる。
+/// 「本体を更新する…」を出す既存の経路に任せる。
 @MainActor
 final class Updater: ObservableObject {
 

@@ -63,7 +63,7 @@ struct MenuContent: View {
                 Text("タイマー: \(DaemonModel.timeFormatter.string(from: deadline)) に終了")
             }
             if !model.daemonLoaded {
-                Text("常駐していません。「本体を入れ直す」で復帰します")
+                Text("常駐していません。「本体を修復する…」で戻ります")
             } else if model.dryRun {
                 Text("いまは停止中（通知のみ・電源は落ちません）")
             } else if let next = model.nextEnforceDate() {
@@ -172,7 +172,8 @@ struct MenuContent: View {
         } else if model.updateAvailable || !model.daemonLoaded {
             // アプリを新しくしても、導入済みの本体は勝手には入れ替わらない。
             // 出口が無いと古いまま動き続けるので、違いが出たら導線を出す。
-            Button("本体を入れ直す…") { confirmReinstall() }
+            // 違いがあるなら更新、外れているだけなら修復。どちらもinstallで、モードと設定は保つ
+            Button(model.updateAvailable ? "本体を更新する…" : "本体を修復する…") { confirmReinstall() }
                 .disabled(model.busy)
         }
 
@@ -230,14 +231,15 @@ struct MenuContent: View {
 
     private func confirmReinstall() {
         let alert = NSAlert()
-        alert.messageText = "本体を入れ直しますか？"
-        let reason = model.daemonLoaded
+        let verb = model.updateAvailable ? "更新" : "修復"
+        alert.messageText = "本体を\(verb)しますか？"
+        let reason = model.updateAvailable
             ? "このアプリが持っている本体と、導入済みの本体が違います。"
             : "本体はありますが、常駐から外れています。"
         alert.informativeText = reason
-            + "入れ直しても、いまのモード（\(model.dryRun ? "停止中" : "本番")）と設定はそのままです。"
+            + "\(verb)しても、いまのモード（\(model.dryRun ? "停止中" : "本番")）と設定はそのままです。"
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "入れ直す")
+        alert.addButton(withTitle: "\(verb)する")
         alert.addButton(withTitle: "やめておく")
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn {

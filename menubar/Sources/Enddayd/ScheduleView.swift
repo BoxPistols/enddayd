@@ -362,7 +362,7 @@ struct ScheduleView: View {
         var warnings = ConfParser.warnings(for: provisionalState)
         // 古い本体は新しい項目（EXTRA_ENFORCE・REQUIRE_APP）を読まない。保存で入れ直すことを先に伝える
         if model.updateAvailable {
-            warnings.append("導入済みの本体がこのアプリと違うので、保存すると本体も入れ直します")
+            warnings.append("導入済みの本体がこのアプリと違うので、保存すると本体も更新します")
         }
         // 再起動後にアプリが起動しないと、その日は何も起きない
         if requireApp && !model.launchesAtLogin {
