@@ -4,7 +4,7 @@
 #
 #   ./build.sh            → dist/Enddayd.app
 #   ./build.sh --run      → ビルドして dist から起動（動作確認用）
-#   ./build.sh --install  → ビルドして /Applications に入れ直して起動（常用はこちら）
+#   ./build.sh --install  → ビルドして /Applications のアプリを置き換えて起動（常用はこちら）
 #
 # 常用するなら --install を使うこと。dist/ から起動したままにすると、
 # 次に ./build.sh を打った時点で「いま動いているアプリ」が消える

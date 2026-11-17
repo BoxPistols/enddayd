@@ -1523,9 +1523,9 @@ cmd_install() {
   if [ "$fresh" = "1" ]; then
     echo "導入しました（ドライラン中：まだ終了しません）"
   elif [ -f "$DRYFLAG" ]; then
-    echo "入れ直しました（ドライランのまま：まだ終了しません）"
+    echo "更新しました（ドライランのまま：まだ終了しません）"
   else
-    echo "入れ直しました（本番のまま：設定した時刻に実際に終了します）"
+    echo "更新しました（本番のまま：設定した時刻に実際に終了します）"
   fi
   echo "  設定を変える: sudo $BIN setup"
   echo "  通しで確認  : sudo $BIN rehearsal"
@@ -1705,7 +1705,7 @@ cmd_timer() {
       fi
       # 監視が動いていないのに置くと、書けただけで落ちない。書く前に断る。
       if ! tick_loaded; then
-        echo "タイマー用のデーモン（${TICK_LABEL}）が登録されていません。sudo $BIN install で入れ直してください" >&2
+        echo "タイマー用のデーモン（${TICK_LABEL}）が登録されていません。sudo $BIN install で登録し直してください" >&2
         exit 1
       fi
       local now deadline tmp replaced=""
