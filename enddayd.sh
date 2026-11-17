@@ -249,11 +249,11 @@ claude_session_field() {
 
 # 標準出力に記録の本文（見出しを除く）を出す。端末が1つも無ければ何も出さない。
 collect_terminals() {
-  local home="$1" pid pgid tpgid tty cmd cwd kind sid st name
+  local home="$1" pid tpgid tty cmd cwd kind sid st name
   # 前面のジョブの先頭（pidが端末の前面プロセスグループと一致するもの）だけを
   # 取る。npmから生えたnodeのような子は先頭のコマンドに含まれる。
   /bin/ps -U "$CONSOLE_UID" -o pid=,pgid=,tpgid=,tty=,command= 2>/dev/null |
-  while read -r pid pgid tpgid tty cmd; do
+  while read -r pid _ tpgid tty cmd; do
     case "$tty" in ttys*) ;; *) continue ;; esac
     [ "$pid" = "$tpgid" ] || continue
     cwd=$(proc_cwd "$pid")
@@ -265,7 +265,7 @@ collect_terminals() {
       claude)     kind=claude
                   sid=$(claude_session_field "$home" "$pid" sessionId)
                   st=$(claude_session_field "$home" "$pid" status) ;;
-      *)          kind=command ;;
+      *)          kind="command" ;;
     esac
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$tty" "$cwd" "$kind" "$(echo "$cmd" | tr '\t' ' ')" "$sid" "$st"
   done | sort
@@ -290,6 +290,8 @@ snapshot_terminals() {
   fi
   n=$(printf '%s\n' "$body" | wc -l | tr -d ' ')
   # rootのまま利用者のホームに書くと所有者がrootになり、利用者が消せなくなる
+  # 中の$1〜$3は利用者側のshが展開するので、単一引用符のままでよい
+  # shellcheck disable=SC2016
   printf '# %s %s\n%s\n' "$(date '+%F %T')" "$tag" "$body" |
     asuser /bin/sh -c '
       umask 077
