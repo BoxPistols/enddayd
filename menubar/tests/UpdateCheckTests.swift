@@ -53,12 +53,12 @@ enum UpdateCheckTests {
         t.equal(act(.auto, manual: true), .prompt, "manual check always asks")
         t.equal(act(.confirm, manual: true, prompted: true), .prompt, "manual check asks again")
 
-        let now = Date(timeIntervalSince1970: 1_000_000)
-        t.equal(UpdateCheck.isNearEnforce(now: now, nextEnforce: now.addingTimeInterval(50 * 60), leadMinutes: 50),
-                true, "notice time itself is near enforce")
-        t.equal(UpdateCheck.isNearEnforce(now: now, nextEnforce: now.addingTimeInterval(51 * 60), leadMinutes: 50),
-                false, "before notice is not near enforce")
-        t.equal(UpdateCheck.isNearEnforce(now: now, nextEnforce: nil, leadMinutes: 50),
-                false, "no schedule is never near enforce")
+        // 18:00予告・18:50強制終了・猶予10分の回
+        let w = [1080...1140]
+        t.equal(UpdateCheck.isNearEnforce(nowMinute: 1080, windows: w), true, "notice time itself is near enforce")
+        t.equal(UpdateCheck.isNearEnforce(nowMinute: 1079, windows: w), false, "before notice is not near enforce")
+        t.equal(UpdateCheck.isNearEnforce(nowMinute: 1135, windows: w), true, "grace after enforce is still near")
+        t.equal(UpdateCheck.isNearEnforce(nowMinute: 1141, windows: w), false, "after grace is not near enforce")
+        t.equal(UpdateCheck.isNearEnforce(nowMinute: 1100, windows: []), false, "no schedule is never near enforce")
     }
 }

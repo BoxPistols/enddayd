@@ -274,10 +274,11 @@ final class DaemonModel: ObservableObject {
     }
 
     /// 次の強制終了の予告から強制終了までの間か。アプリの自動更新をこの間は見送る
+    /// 延長しても予告は元の時刻に来るので、始まりは元の予告、終わりは延長後の強制終了＋猶予にする
     func isNearEnforce(now: Date = Date()) -> Bool {
-        guard let first = sessions.first else { return false }
-        return UpdateCheck.isNearEnforce(now: now, nextEnforce: nextEnforceDate(),
-                                         leadMinutes: first.enforce - first.notice)
+        guard isScheduledToday else { return false }
+        let windows = sessions.map { $0.notice...(killMinute(of: $0) + conf.killGrace) }
+        return UpdateCheck.isNearEnforce(nowMinute: Self.minuteOfDay(now), windows: windows)
     }
 
     // ------------------------------------------------------------ 操作 ---

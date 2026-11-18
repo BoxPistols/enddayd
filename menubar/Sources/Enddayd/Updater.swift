@@ -21,7 +21,7 @@ final class Updater: ObservableObject {
     private static let checkInterval: TimeInterval = 24 * 60 * 60
     private static let lastCheckKey = "updateLastCheck"
     private static let promptedKey = "updatePromptedVersion"
-    static let modeKey = "updateMode"
+    nonisolated static let modeKey = "updateMode"
     /// 自動で置き換えた版。開き直した後に「更新しました」を1回だけ知らせる
     private static let installedKey = "updateAutoInstalledVersion"
 
@@ -100,8 +100,9 @@ final class Updater: ObservableObject {
     }
 
     /// 既に知っている更新を、いまの方法で扱い直す（通信はしない）
+    /// 確認の通信中は待つ。結果でavailableが変わる前に古い版の置き換えを始めない
     private func applyKnownUpdate() {
-        guard let r = available, !busy else { return }
+        guard let r = available, !busy, !checking else { return }
         handle(r, manual: false)
     }
 
@@ -120,7 +121,10 @@ final class Updater: ObservableObject {
     }
 
     private static var settingsWindowIsOpen: Bool {
-        NSApp.windows.contains { $0.isVisible && $0.identifier?.rawValue.contains("schedule") == true }
+        // 最小化していても、閉じるまでは書きかけの設定が残っている
+        NSApp.windows.contains {
+            ($0.isVisible || $0.isMiniaturized) && $0.identifier?.rawValue.contains("schedule") == true
+        }
     }
 
     /// 同じ版では1回だけ出す（記録はhandleが読む）。毎日出ると閉じるだけの操作になり、知らせとして効かなくなる
@@ -155,7 +159,8 @@ final class Updater: ObservableObject {
         Task.detached(priority: .userInitiated) {
             let failure: String?
             do {
-                try await Self.install(from: asset, version: r.version, bundleID: bundleID, into: target)
+                try await Self.install(from: asset, version: r.version, bundleID: bundleID, into: target,
+                                       auto: auto)
                 failure = nil
             } catch {
                 failure = error.localizedDescription
@@ -182,7 +187,7 @@ final class Updater: ObservableObject {
     /// 取ってきたzipを展開し、中身が同じアプリの指定の版であることを確かめてから置き換える。
     /// 確かめずに置くと、Releaseの添付を取り違えたときに別物で上書きしてしまう。
     nonisolated private static func install(from asset: URL, version: String,
-                                            bundleID: String, into target: URL) async throws {
+                                            bundleID: String, into target: URL, auto: Bool) async throws {
         let fm = FileManager.default
         let (zip, _) = try await URLSession.shared.download(from: asset)
         let work = fm.temporaryDirectory.appendingPathComponent("enddayd-update-\(UUID().uuidString)")
@@ -204,6 +209,10 @@ final class Updater: ObservableObject {
         }
         guard run("/usr/bin/codesign", ["--verify", "--deep", app.path]) == 0 else {
             throw UpdateError("zipの中のアプリの署名を確かめられませんでした")
+        }
+        // 取得の間に「確認してから更新する」へ戻されたら、聞かずに置き換えない
+        if auto && UserDefaults.standard.string(forKey: modeKey) != UpdateCheck.Mode.auto.rawValue {
+            throw UpdateError("更新の方法が変わったので、自動の更新をやめました")
         }
         do {
             _ = try fm.replaceItemAt(target, withItemAt: app)

@@ -111,11 +111,9 @@ extension UpdateCheck {
         return alreadyPrompted ? .none : .prompt
     }
 
-    /// nowが、次の強制終了の予告から強制終了までの間か。
-    /// leadMinutesは予告から強制終了までの長さ（既定では50分）
-    static func isNearEnforce(now: Date, nextEnforce: Date?, leadMinutes: Int) -> Bool {
-        guard let nextEnforce else { return false }
-        let left = nextEnforce.timeIntervalSince(now)
-        return left >= 0 && left <= Double(leadMinutes * 60)
+    /// 今日のその時刻（0:00からの分）が、どれかの回の「予告から強制終了の猶予が切れるまで」に入るか。
+    /// 猶予の間は、スリープから戻った直後などに強制終了がまだ走り得る
+    static func isNearEnforce(nowMinute: Int, windows: [ClosedRange<Int>]) -> Bool {
+        windows.contains { $0.contains(nowMinute) }
     }
 }
