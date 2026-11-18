@@ -50,7 +50,7 @@ enum MenuBarIcon {
     /// MenuBarExtra のラベルは template 画像を白黒に塗り直すので、
     /// `Image(systemName:)` に色を付けても効かない。色を出すときは
     /// 色を焼き込んだ画像を作り、template をやめる。
-    static func image(symbol: String, color: NSColor?) -> NSImage? {
+    static func image(symbol: String, color: NSColor?, badge: Bool = false) -> NSImage? {
         guard let base = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) else { return nil }
         var config = NSImage.SymbolConfiguration(textStyle: .body)
         if let color {
@@ -58,6 +58,38 @@ enum MenuBarIcon {
         }
         let image = base.withSymbolConfiguration(config) ?? base
         image.isTemplate = (color == nil)
+        return badge ? withBadge(image, color: color) : image
+    }
+
+    /// 右上に赤い点を重ねる（更新があるとき）。赤を出すのでtemplateはやめる。
+    /// モノクロのときは記号をメニューバーの文字色で塗る。描く時点の外観で色を決めるので、
+    /// 明るいメニューバーと暗いメニューバーのどちらでも記号が沈まない
+    static func withBadge(_ symbol: NSImage, color: NSColor?) -> NSImage {
+        let size = symbol.size
+        // 点は記号の高さの3割。大きいと記号の線を削り、小さいと赤が見えない。
+        // 右へ点の半分ぶん広げ、記号の外にはみ出させて重なりを減らす
+        let d = (size.height * 0.3).rounded()
+        let canvas = NSSize(width: size.width + d / 2, height: size.height)
+        let image = NSImage(size: canvas, flipped: false) { _ in
+            let tinted = NSImage(size: size, flipped: false) { r in
+                symbol.draw(in: r)
+                if color == nil {
+                    NSColor.labelColor.set()
+                    r.fill(using: .sourceAtop)
+                }
+                return true
+            }
+            tinted.draw(in: NSRect(origin: .zero, size: size))
+            let dot = NSRect(x: canvas.width - d, y: canvas.height - d, width: d, height: d)
+            // 点の周りを少し抜き、記号と重なっても点の形が読めるようにする
+            NSGraphicsContext.current?.compositingOperation = .clear
+            NSBezierPath(ovalIn: dot.insetBy(dx: -1, dy: -1)).fill()
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
+            NSColor.systemRed.setFill()
+            NSBezierPath(ovalIn: dot).fill()
+            return true
+        }
+        image.isTemplate = false
         return image
     }
 }

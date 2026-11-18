@@ -9,7 +9,7 @@ import Foundation
 struct TestMain {
 
     /// ConfParserTests 52件 + LogReaderTests 23件 + TodayOverrideTests 28件 + TerminalSnapshotTests 7件 + UpdateCheckTests 18件
-    static let planned = 134
+    static let planned = 145
 
     static func main() {
         var harness = Harness()

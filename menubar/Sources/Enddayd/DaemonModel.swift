@@ -273,6 +273,13 @@ final class DaemonModel: ObservableObject {
         return nil
     }
 
+    /// 次の強制終了の予告から強制終了までの間か。アプリの自動更新をこの間は見送る
+    func isNearEnforce(now: Date = Date()) -> Bool {
+        guard let first = sessions.first else { return false }
+        return UpdateCheck.isNearEnforce(now: now, nextEnforce: nextEnforceDate(),
+                                         leadMinutes: first.enforce - first.notice)
+    }
+
     // ------------------------------------------------------------ 操作 ---
 
     /// 管理者権限の操作を背景で実行し、終わったら状態を読み直す

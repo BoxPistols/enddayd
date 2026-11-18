@@ -37,5 +37,28 @@ enum UpdateCheckTests {
         t.equal(UpdateCheck.outcome(status: 500, data: nil, current: "0.8.0"), .failed, "server error is a failure")
         t.equal(UpdateCheck.outcome(status: nil, data: nil, current: "0.8.0"), .failed, "network error is a failure")
         t.equal(UpdateCheck.outcome(status: 200, data: Data("x".utf8), current: "0.8.0"), .failed, "broken body is a failure")
+
+        // 更新の方法ごとの扱い。自動を選んでも、強制終了の直前には置き換えない
+        func act(_ mode: UpdateCheck.Mode, manual: Bool = false, asset: Bool = true,
+                 prompted: Bool = false, near: Bool = false) -> UpdateCheck.Action {
+            UpdateCheck.action(mode: mode, manual: manual, hasAsset: asset,
+                               alreadyPrompted: prompted, nearEnforce: near)
+        }
+        t.equal(act(.confirm), .prompt, "confirm mode asks once")
+        t.equal(act(.confirm, prompted: true), .none, "confirm mode does not ask twice for the same version")
+        t.equal(act(.auto), .install, "auto mode installs without asking")
+        t.equal(act(.auto, prompted: true), .install, "auto mode installs even after an earlier prompt")
+        t.equal(act(.auto, near: true), .none, "auto mode waits while shutdown is near")
+        t.equal(act(.auto, asset: false), .prompt, "auto mode without a zip falls back to asking")
+        t.equal(act(.auto, manual: true), .prompt, "manual check always asks")
+        t.equal(act(.confirm, manual: true, prompted: true), .prompt, "manual check asks again")
+
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        t.equal(UpdateCheck.isNearEnforce(now: now, nextEnforce: now.addingTimeInterval(50 * 60), leadMinutes: 50),
+                true, "notice time itself is near enforce")
+        t.equal(UpdateCheck.isNearEnforce(now: now, nextEnforce: now.addingTimeInterval(51 * 60), leadMinutes: 50),
+                false, "before notice is not near enforce")
+        t.equal(UpdateCheck.isNearEnforce(now: now, nextEnforce: nil, leadMinutes: 50),
+                false, "no schedule is never near enforce")
     }
 }
