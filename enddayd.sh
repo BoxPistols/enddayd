@@ -17,7 +17,7 @@
 #   sudo ./enddayd.sh uninstall        削除
 #   sudo ./enddayd.sh run              LaunchDaemon から呼ばれる本体（時刻指定）
 #   sudo ./enddayd.sh tick             LaunchDaemon から毎分呼ばれる本体（タイマー）
-#   ./enddayd.sh restore [--print|list|<記録>]
+#   ./enddayd.sh restore [--print] [list|<記録>]
 #                                      記録した端末の作業をiTerm2で開き直す（sudoなし）
 #
 # 既定のスケジュール（月〜金）
@@ -1956,7 +1956,10 @@ restore_plan() {
 }
 
 cmd_restore() {
-  local arg="${1:-}" home dir file line enter first=1 script
+  local print=0 arg home dir file line enter first=1 script
+  # --printは記録の指定と組み合わせられる（restore --print <記録>）
+  if [ "${1:-}" = "--print" ]; then print=1; shift; fi
+  arg="${1:-}"
   if [ "$(id -u)" -eq 0 ]; then echo "restoreはsudoを付けずに実行してください" >&2; exit 1; fi
   home="$HOME"
   dir=$(snapshot_dir "$home")
@@ -1965,7 +1968,7 @@ cmd_restore() {
       ls -1t "$dir"/*.tsv 2>/dev/null || echo "記録はまだありません（${dir}）"
       return 0 ;;
     # 再起動のあとはprev-boot.tsv（電源が落ちる前の最後の記録）を開く
-    ''|--print)
+    '')
       file="$dir/prev-boot.tsv"
       [ -f "$file" ] || file="$dir/latest.tsv" ;;
     *) file="$arg" ;;
@@ -1979,7 +1982,7 @@ cmd_restore() {
     printf "  %-8s %s\n           %s\n", $1, $2, s }'
 
   # --printは計画を見せるだけ。テストと、開く前に中身を確かめたいとき用
-  if [ "$arg" = "--print" ]; then
+  if [ "$print" = "1" ]; then
     echo; echo "開くときにタブで入力する行:"
     restore_plan "$file" | awk -F'\t' '{ printf "  %s%s\n", $1, ($2 == "1" ? "" : "   （Enterは押さない）") }'
     return 0
@@ -2018,7 +2021,7 @@ case "${1:-}" in
   today)      cmd_today "${2:-show}" "${3:-}" "${4:-}" ;;
   timer)      cmd_timer "${2:-show}" "${3:-}" ;;
   tick)       cmd_tick ;;
-  restore)    cmd_restore "${2:-}" ;;
+  restore)    shift; cmd_restore "$@" ;;
   status)     cmd_status ;;
   rehearsal)  cmd_rehearsal "${2:-}" ;;
   stage)      cmd_stage "${2:-notice}" ;;
