@@ -31,18 +31,18 @@ struct EnddaydApp: App {
         } label: {
             // メニューバーに常駐する本体。テキストは状態に追従する
             // 色を付けるのは動いている状態だけ（IconTint の説明を参照）
+            // 更新があることはメニューを開かなくても見えるように、記号の右上に赤い点を付ける
             if let image = MenuBarIcon.image(symbol: model.symbolName,
-                                             color: model.symbolIsActive ? tint.color : nil) {
+                                             color: model.symbolIsActive ? tint.color : nil,
+                                             badge: updater.available != nil) {
                 Image(nsImage: image)
+                    .onAppear { connectUpdater() }
             } else {
                 Image(systemName: model.symbolName)
+                    .onAppear { connectUpdater() }
             }
             if !model.barText.isEmpty {
                 Text(model.barText)
-            }
-            // 更新があることはメニューを開かなくても見えるようにする
-            if updater.available != nil {
-                Image(systemName: "arrow.down.circle.fill")
             }
         }
         .menuBarExtraStyle(.menu)
@@ -53,5 +53,10 @@ struct EnddaydApp: App {
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
+    }
+
+    /// 自動更新が強制終了の直前に走らないよう、本体の時刻を更新側から読めるようにする
+    private func connectUpdater() {
+        updater.isNearEnforce = { [weak model] in model?.isNearEnforce() ?? false }
     }
 }

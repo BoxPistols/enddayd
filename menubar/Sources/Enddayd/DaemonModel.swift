@@ -273,6 +273,14 @@ final class DaemonModel: ObservableObject {
         return nil
     }
 
+    /// 次の強制終了の予告から強制終了までの間か。アプリの自動更新をこの間は見送る
+    /// 延長しても予告は元の時刻に来るので、始まりは元の予告、終わりは延長後の強制終了＋猶予にする
+    func isNearEnforce(now: Date = Date()) -> Bool {
+        guard isScheduledToday else { return false }
+        let windows = sessions.map { $0.notice...(killMinute(of: $0) + conf.killGrace) }
+        return UpdateCheck.isNearEnforce(nowMinute: Self.minuteOfDay(now), windows: windows)
+    }
+
     // ------------------------------------------------------------ 操作 ---
 
     /// 管理者権限の操作を背景で実行し、終わったら状態を読み直す

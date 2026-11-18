@@ -1,8 +1,10 @@
 import Foundation
 import AppKit
+import UserNotifications
 
 /// アプリ自身の更新。GitHub Releasesを1日1回見て、新しい版があれば
-/// メニューバーの印・メニューの項目・版ごとに1回のポップアップで知らせる。
+/// メニューバーの赤い点とメニューの項目で知らせる。そのうえで、利用者が選んだ
+/// 「更新の方法」に従い、版ごとに1回ポップアップで聞くか、自動で置き換える。
 ///
 /// 置き換えるのはアプリだけ。常駐している本体（/usr/local/bin/enddayd.sh）は
 /// 管理者権限が要るので、更新後にDaemonModelが違いを検出して
@@ -19,6 +21,16 @@ final class Updater: ObservableObject {
     private static let checkInterval: TimeInterval = 24 * 60 * 60
     private static let lastCheckKey = "updateLastCheck"
     private static let promptedKey = "updatePromptedVersion"
+    nonisolated static let modeKey = "updateMode"
+    /// 自動で置き換えた版。開き直した後に「更新しました」を1回だけ知らせる
+    private static let installedKey = "updateAutoInstalledVersion"
+
+    /// 強制終了の予告から強制終了までの間か。アプリの入口でDaemonModelにつなぐ
+    var isNearEnforce: () -> Bool = { false }
+
+    var mode: UpdateCheck.Mode {
+        UpdateCheck.Mode(rawValue: UserDefaults.standard.string(forKey: Self.modeKey) ?? "") ?? .confirm
+    }
 
     private var timer: Timer?
 
@@ -27,13 +39,18 @@ final class Updater: ObservableObject {
     }
 
     init() {
+        announceAutoInstallIfAny()
         // 起動直後はログイン時の他のアプリと重なるので少し待つ
         DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
             self?.checkIfDue()
         }
         // スリープを挟むと1日おきのTimerは当てにならないので、1時間ごとに「期限が来たか」を見る
+        // 強制終了の前で見送った自動更新も、ここで改めて試す
         timer = Timer.scheduledTimer(withTimeInterval: 60 * 60, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.checkIfDue() }
+            Task { @MainActor in
+                self?.checkIfDue()
+                self?.applyKnownUpdate()
+            }
         }
     }
 
@@ -64,7 +81,7 @@ final class Updater: ObservableObject {
             case .newer(let release):
                 UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.lastCheckKey)
                 available = release
-                promptOnce(release, force: manual)
+                handle(release, manual: manual)
             case .upToDate:
                 UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.lastCheckKey)
                 available = nil
@@ -76,11 +93,43 @@ final class Updater: ObservableObject {
         }
     }
 
-    /// 同じ版では1回だけ出す。毎日出ると閉じるだけの操作になり、知らせとして効かなくなる
-    private func promptOnce(_ r: UpdateCheck.Release, force: Bool) {
-        let defaults = UserDefaults.standard
-        if !force && defaults.string(forKey: Self.promptedKey) == r.version { return }
-        defaults.set(r.version, forKey: Self.promptedKey)
+    /// メニューで方法を変えたとき。自動に切り替えた時点で知っている更新があれば、そのまま進める
+    func setMode(_ newMode: UpdateCheck.Mode) {
+        UserDefaults.standard.set(newMode.rawValue, forKey: Self.modeKey)
+        applyKnownUpdate()
+    }
+
+    /// 既に知っている更新を、いまの方法で扱い直す（通信はしない）
+    /// 確認の通信中は待つ。結果でavailableが変わる前に古い版の置き換えを始めない
+    private func applyKnownUpdate() {
+        guard let r = available, !busy, !checking else { return }
+        handle(r, manual: false)
+    }
+
+    private func handle(_ r: UpdateCheck.Release, manual: Bool) {
+        let action = UpdateCheck.action(
+            mode: mode, manual: manual, hasAsset: r.assetURL != nil,
+            alreadyPrompted: UserDefaults.standard.string(forKey: Self.promptedKey) == r.version,
+            nearEnforce: isNearEnforce())
+        switch action {
+        // 設定の画面を開いている間は開き直さない。書きかけの設定が消える
+        case .install where Self.settingsWindowIsOpen: break
+        case .install: update(auto: true)
+        case .prompt:  prompt(r)
+        case .none:    break
+        }
+    }
+
+    private static var settingsWindowIsOpen: Bool {
+        // 最小化していても、閉じるまでは書きかけの設定が残っている
+        NSApp.windows.contains {
+            ($0.isVisible || $0.isMiniaturized) && $0.identifier?.rawValue.contains("schedule") == true
+        }
+    }
+
+    /// 同じ版では1回だけ出す（記録はhandleが読む）。毎日出ると閉じるだけの操作になり、知らせとして効かなくなる
+    private func prompt(_ r: UpdateCheck.Release) {
+        UserDefaults.standard.set(r.version, forKey: Self.promptedKey)
 
         let alert = NSAlert()
         alert.messageText = "Enddayd \(r.version)が出ています"
@@ -91,7 +140,8 @@ final class Updater: ObservableObject {
         if alert.runModal() == .alertFirstButtonReturn { update() }
     }
 
-    func update() {
+    /// autoは自動更新から。失敗してもダイアログは出さず、メニューの項目と赤い点を残して次の機会に任せる
+    func update(auto: Bool = false) {
         // 確認が重なってポップアップから再び呼ばれても、置き換えを重ねない
         guard !busy, let r = available else { return }
         guard let asset = r.assetURL else {
@@ -109,7 +159,8 @@ final class Updater: ObservableObject {
         Task.detached(priority: .userInitiated) {
             let failure: String?
             do {
-                try await Self.install(from: asset, version: r.version, bundleID: bundleID, into: target)
+                try await Self.install(from: asset, version: r.version, bundleID: bundleID, into: target,
+                                       auto: auto)
                 failure = nil
             } catch {
                 failure = error.localizedDescription
@@ -119,8 +170,9 @@ final class Updater: ObservableObject {
                 self.busy = false
                 if let failure {
                     self.lastError = failure
-                    self.inform("更新できませんでした", failure)
+                    if !auto { self.inform("更新できませんでした", failure) }
                 } else {
+                    if auto { UserDefaults.standard.set(r.version, forKey: Self.installedKey) }
                     Self.relaunch(target)
                 }
             }
@@ -135,7 +187,7 @@ final class Updater: ObservableObject {
     /// 取ってきたzipを展開し、中身が同じアプリの指定の版であることを確かめてから置き換える。
     /// 確かめずに置くと、Releaseの添付を取り違えたときに別物で上書きしてしまう。
     nonisolated private static func install(from asset: URL, version: String,
-                                            bundleID: String, into target: URL) async throws {
+                                            bundleID: String, into target: URL, auto: Bool) async throws {
         let fm = FileManager.default
         let (zip, _) = try await URLSession.shared.download(from: asset)
         let work = fm.temporaryDirectory.appendingPathComponent("enddayd-update-\(UUID().uuidString)")
@@ -157,6 +209,10 @@ final class Updater: ObservableObject {
         }
         guard run("/usr/bin/codesign", ["--verify", "--deep", app.path]) == 0 else {
             throw UpdateError("zipの中のアプリの署名を確かめられませんでした")
+        }
+        // 取得の間に「確認してから更新する」へ戻されたら、聞かずに置き換えない
+        if auto && UserDefaults.standard.string(forKey: modeKey) != UpdateCheck.Mode.auto.rawValue {
+            throw UpdateError("更新の方法が変わったので、自動の更新をやめました")
         }
         do {
             _ = try fm.replaceItemAt(target, withItemAt: app)
@@ -183,6 +239,25 @@ final class Updater: ObservableObject {
         do { try p.run() } catch { return -1 }
         p.waitUntilExit()
         return p.terminationStatus
+    }
+
+    /// 自動で更新して開き直した直後に、macOSの通知で1回だけ知らせる。
+    /// 黙って版が変わると、動きが変わったときに原因へたどり着けない
+    private func announceAutoInstallIfAny() {
+        let defaults = UserDefaults.standard
+        guard let version = defaults.string(forKey: Self.installedKey) else { return }
+        defaults.removeObject(forKey: Self.installedKey)
+        // 置き換えに失敗して古い版のまま開いたときは知らせない
+        guard version == Self.currentVersion else { return }
+        // 送り先は閉包の中で取り直す（外から持ち込むとSwift 6のSendable検査に掛かる）
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "Enddaydを\(version)に更新しました"
+            content.body = "更新の方法はメニューの「更新の方法」で変えられます。"
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "enddayd-updated-\(version)",
+                                             content: content, trigger: nil))
+        }
     }
 
     private func inform(_ title: String, _ body: String) {
