@@ -165,14 +165,26 @@ final class Updater: ObservableObject {
         }
     }
 
-    /// 自分が終わってから開き直す。先に開くと二重起動の防止（AppDelegate）で新しいほうが閉じる
+    /// 自分が終わってから開き直す。先に開くと二重起動の防止（AppDelegate）で新しいほうが閉じる。
+    /// 決まった秒数を待つ形だと、終了がそれより遅れたときに同じことが起きるので、PIDが消えるのを待つ。
+    /// 60秒たっても終わらなければ開かない（開いても閉じられるだけなので）
     private static func relaunch(_ app: URL) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", "sleep 2; /usr/bin/open \"$0\"", app.path]
+        // パスは$0、PIDは$1で渡す。文字列に埋め込むと、空白や引用符を含むパスで壊れる
+        p.arguments = ["-c", relaunchScript, app.path, String(ProcessInfo.processInfo.processIdentifier)]
         try? p.run()
         NSApp.terminate(nil)
     }
+
+    static let relaunchScript = """
+    i=0
+    while kill -0 "$1" 2>/dev/null; do
+      i=$((i+1)); [ "$i" -gt 300 ] && exit 1
+      sleep 0.2
+    done
+    /usr/bin/open "$0"
+    """
 
     nonisolated private static func run(_ path: String, _ args: [String]) -> Int32 {
         let p = Process()
