@@ -37,5 +37,28 @@ enum UpdateCheckTests {
         t.equal(UpdateCheck.outcome(status: 500, data: nil, current: "0.8.0"), .failed, "server error is a failure")
         t.equal(UpdateCheck.outcome(status: nil, data: nil, current: "0.8.0"), .failed, "network error is a failure")
         t.equal(UpdateCheck.outcome(status: 200, data: Data("x".utf8), current: "0.8.0"), .failed, "broken body is a failure")
+
+        // 更新の方法ごとの扱い。自動を選んでも、強制終了の直前には置き換えない
+        func act(_ mode: UpdateCheck.Mode, manual: Bool = false, asset: Bool = true,
+                 prompted: Bool = false, near: Bool = false) -> UpdateCheck.Action {
+            UpdateCheck.action(mode: mode, manual: manual, hasAsset: asset,
+                               alreadyPrompted: prompted, nearEnforce: near)
+        }
+        t.equal(act(.confirm), .prompt, "confirm mode asks once")
+        t.equal(act(.confirm, prompted: true), .none, "confirm mode does not ask twice for the same version")
+        t.equal(act(.auto), .install, "auto mode installs without asking")
+        t.equal(act(.auto, prompted: true), .install, "auto mode installs even after an earlier prompt")
+        t.equal(act(.auto, near: true), .none, "auto mode waits while shutdown is near")
+        t.equal(act(.auto, asset: false), .prompt, "auto mode without a zip falls back to asking")
+        t.equal(act(.auto, manual: true), .prompt, "manual check always asks")
+        t.equal(act(.confirm, manual: true, prompted: true), .prompt, "manual check asks again")
+
+        // 18:00予告・18:50強制終了・猶予10分の回
+        let w = [1080...1140]
+        t.equal(UpdateCheck.isNearEnforce(nowMinute: 1080, windows: w), true, "notice time itself is near enforce")
+        t.equal(UpdateCheck.isNearEnforce(nowMinute: 1079, windows: w), false, "before notice is not near enforce")
+        t.equal(UpdateCheck.isNearEnforce(nowMinute: 1135, windows: w), true, "grace after enforce is still near")
+        t.equal(UpdateCheck.isNearEnforce(nowMinute: 1141, windows: w), false, "after grace is not near enforce")
+        t.equal(UpdateCheck.isNearEnforce(nowMinute: 1100, windows: []), false, "no schedule is never near enforce")
     }
 }

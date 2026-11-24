@@ -6,6 +6,7 @@ struct MenuContent: View {
     @EnvironmentObject var updater: Updater
     @Environment(\.openWindow) private var openWindow
     @AppStorage("iconTint") private var tint: IconTint = .gold
+    @AppStorage(Updater.modeKey) private var updateMode: UpdateCheck.Mode = .confirm
 
     var body: some View {
         Group {
@@ -144,6 +145,8 @@ struct MenuContent: View {
             openWindow(id: "schedule")
             NSApp.activate(ignoringOtherApps: true)
         }
+        // 更新の取得中に開くと、置き換えて開き直すときに編集中の画面が閉じる
+        .disabled(updater.busy)
 
         Button("通しで確認（リハーサル）") { model.rehearsal() }
             .disabled(model.busy)
@@ -205,6 +208,15 @@ struct MenuContent: View {
         Text("バージョン \(Self.appVersion)")
         Button(updater.checking ? "更新を確認しています…" : "更新を確認") { updater.check(manual: true) }
             .disabled(updater.busy || updater.checking)
+        // 自動でも、強制終了の予告から強制終了までの間と、設定の画面を開いている間は更新しない
+        Picker("更新の方法", selection: Binding(
+            get: { updateMode },
+            set: { updateMode = $0; updater.setMode($0) }
+        )) {
+            ForEach(UpdateCheck.Mode.allCases) { option in
+                Text(option.label).tag(option)
+            }
+        }
 
         Divider()
         // デーモンはアプリと別に動くので、終了で何が止まるかを名前で示す

@@ -70,3 +70,50 @@ enum UpdateCheck {
         return Release(version: version, pageURL: page, assetURL: asset)
     }
 }
+
+/// 新しい版が見つかったときにどうするか。利用者が選ぶ「更新の方法」と、
+/// 強制終了が近いかどうかから決める。画面と通信から切り離してテストする。
+extension UpdateCheck {
+
+    enum Mode: String, CaseIterable, Identifiable {
+        case confirm
+        case auto
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .confirm: return "確認してから更新する"
+            case .auto:    return "自動で更新する"
+            }
+        }
+    }
+
+    enum Action: Equatable {
+        /// 確かめずに置き換えて開き直す
+        case install
+        /// ポップアップで聞く
+        case prompt
+        /// 何もしない（メニューバーの赤い点とメニューの項目だけで知らせる）
+        case none
+    }
+
+    /// manualはメニューの「更新を確認」から。自分で確かめに行ったので、方法によらず聞く。
+    /// 自動でも、強制終了の予告から強制終了までの間は置き換えない。
+    /// 開き直しが通知や確認のダイアログと重なると、利用者が状況を読み違える。
+    static func action(mode: Mode, manual: Bool, hasAsset: Bool,
+                       alreadyPrompted: Bool, nearEnforce: Bool) -> Action {
+        if manual { return .prompt }
+        if mode == .auto && hasAsset {
+            return nearEnforce ? .none : .install
+        }
+        // 自動でもzipが無ければ置き換えられないので、確認と同じく1回だけ聞く
+        return alreadyPrompted ? .none : .prompt
+    }
+
+    /// 今日のその時刻（0:00からの分）が、どれかの回の「予告から強制終了の猶予が切れるまで」に入るか。
+    /// 猶予の間は、スリープから戻った直後などに強制終了がまだ走り得る
+    static func isNearEnforce(nowMinute: Int, windows: [ClosedRange<Int>]) -> Bool {
+        windows.contains { $0.contains(nowMinute) }
+    }
+}
