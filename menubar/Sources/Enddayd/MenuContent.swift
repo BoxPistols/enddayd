@@ -145,6 +145,8 @@ struct MenuContent: View {
             openWindow(id: "schedule")
             NSApp.activate(ignoringOtherApps: true)
         }
+        // 更新の取得中に開くと、置き換えて開き直すときに編集中の画面が閉じる
+        .disabled(updater.busy)
 
         Button("通しで確認（リハーサル）") { model.rehearsal() }
             .disabled(model.busy)
